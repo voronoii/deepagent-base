@@ -1,0 +1,72 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://10.1.61.227:8002/v1}
+      - AGENT_ROOT_DIR=/app
+      - DOCKER_ENV=1
+    depends_on:
+      mcp-news:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - deepagent
+
+  mcp-news:
+    build:
+      context: ./mcp_servers
+      args:
+        TOOL_DIR: news
+    ports:
+      - "1879:1879"
+    environment:
+      - MCP_PORT=1879
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:1879/mcp/')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - deepagent
+
+  # 새 MCP 서버 추가 시 여기에 복사 후 수정
+  # mcp-search:
+  #   build:
+  #     context: ./mcp_servers
+  #     args:
+  #       TOOL_DIR: search
+  #   ports:
+  #     - "8002:8001"
+  #   environment:
+  #     - MCP_PORT=8001
+  #   networks:
+  #     - deepagent
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - deepagent
+
+networks:
+  deepagent:
+    driver: bridge

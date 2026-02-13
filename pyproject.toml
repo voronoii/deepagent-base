@@ -1,0 +1,20 @@
+[project]
+name = "deepagent-base"
+version = "0.1.0"
+description = "Multi-agent workflow system with DeepAgents"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "sse-starlette>=2.0.0",
+    "langchain-openai>=1.0.0",
+    "langchain-community>=0.4.0",
+    "deepagents>=0.3.0",
+    "duckduckgo-search>=6.0.0",
+    "langgraph>=0.4.0",
+    "mcp>=1.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends"

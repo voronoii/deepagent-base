@@ -1,0 +1,54 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme inline {
+  --color-primary: #2b6cee;
+  --color-bg-dark: #101622;
+  --color-panel-dark: #1a2233;
+  --color-border-dark: #232f48;
+  --color-bg-light: #f6f6f8;
+  --font-sans: "Public Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background-color: var(--color-bg-dark);
+  color: #f1f5f9;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Material Symbols configuration */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #232f48;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: #2b6cee;
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #232f48 transparent;
+}
+
+/* Textarea reset for Tailwind v4 */
+textarea:focus {
+  outline: none;
+  box-shadow: none;
+}
