@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { TokenUsage } from '@/types';
+import McpOverlay from './McpOverlay';
 
 interface ChatInputProps {
   onSend: (message: string) => void;
@@ -11,6 +12,7 @@ interface ChatInputProps {
 
 export default function ChatInput({ onSend, disabled = false, tokenUsage }: ChatInputProps) {
   const [value, setValue] = useState('');
+  const [mcpOpen, setMcpOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -49,15 +51,15 @@ export default function ChatInput({ onSend, disabled = false, tokenUsage }: Chat
     'bg-primary';
 
   return (
-    <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-bg-dark via-bg-dark to-transparent">
+    <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent">
       <div className="max-w-4xl mx-auto relative">
-        <div className="flex items-end gap-2 bg-panel-dark border border-border-dark rounded-xl p-2 pr-3 shadow-xl">
-          <button className="p-2 text-slate-400 hover:text-primary transition-colors">
+        <div className="flex items-end gap-2 bg-white border border-slate-200 rounded-xl p-2 pr-3 shadow-lg">
+          <button className="p-2 text-slate-400 hover:text-blue-600 transition-colors">
             <span className="material-symbols-outlined">attach_file</span>
           </button>
           <textarea
             ref={textareaRef}
-            className="w-full bg-transparent border-none focus:ring-0 focus:outline-none text-sm py-2 px-2 resize-none text-slate-100 placeholder-slate-500"
+            className="w-full bg-transparent border-none focus:ring-0 focus:outline-none text-sm py-2 px-2 resize-none text-slate-900 placeholder-slate-400"
             placeholder="Type a follow-up or a new command..."
             rows={1}
             value={value}
@@ -68,7 +70,7 @@ export default function ChatInput({ onSend, disabled = false, tokenUsage }: Chat
           <button
             onClick={handleSubmit}
             disabled={disabled || !value.trim()}
-            className="bg-primary text-white px-4 py-2 rounded-lg font-semibold text-sm flex items-center gap-2 hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold text-sm flex items-center gap-2 hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <span>Send</span>
             <span className="material-symbols-outlined text-sm">send</span>
@@ -77,6 +79,23 @@ export default function ChatInput({ onSend, disabled = false, tokenUsage }: Chat
 
         {/* Token usage indicator */}
         <div className="flex items-center gap-3 mt-2 px-1">
+          {/* MCP button */}
+          <div className="relative">
+            <McpOverlay isOpen={mcpOpen} onClose={() => setMcpOpen(false)} />
+            <button
+              onClick={() => setMcpOpen((p) => !p)}
+              title="MCP Connections"
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium transition-colors border ${
+                mcpOpen
+                  ? 'text-blue-600 bg-blue-50 border-blue-200'
+                  : 'text-slate-400 bg-slate-50 border-slate-200 hover:text-blue-600 hover:bg-blue-50 hover:border-blue-200'
+              }`}
+            >
+              <span className="material-symbols-outlined text-sm">hub</span>
+              <span>MCP</span>
+            </button>
+          </div>
+
           <div className="flex items-center gap-1.5">
             <span className={`material-symbols-outlined text-xs ${usageColor}`}>token</span>
             <span className={`text-[11px] font-mono ${usageColor}`}>
@@ -86,7 +105,7 @@ export default function ChatInput({ onSend, disabled = false, tokenUsage }: Chat
               }
             </span>
           </div>
-          <div className="w-24 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+          <div className="w-24 h-1.5 bg-slate-200 rounded-full overflow-hidden">
             <div
               className={`h-full rounded-full transition-all duration-500 ease-out ${barColor}`}
               style={{ width: `${usagePercent}%` }}

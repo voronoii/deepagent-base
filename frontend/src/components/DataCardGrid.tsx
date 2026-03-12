@@ -12,10 +12,10 @@ export default function DataCardGrid({ cards }: DataCardGridProps) {
       {cards.map((card, i) => (
         <div
           key={i}
-          className="bg-slate-800/50 p-3 rounded-lg border border-slate-800"
+          className="bg-slate-50 p-3 rounded-lg border border-slate-200"
         >
           <p className="text-[10px] text-slate-500 uppercase font-bold">{card.label}</p>
-          <p className="text-lg font-bold text-primary">{card.value}</p>
+          <p className="text-lg font-bold text-blue-600">{card.value}</p>
         </div>
       ))}
     </div>

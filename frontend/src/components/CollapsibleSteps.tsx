@@ -75,7 +75,7 @@ export default function CollapsibleSteps({ steps, isActive = false }: Collapsibl
       <button
         type="button"
         onClick={() => setIsExpanded((prev) => !prev)}
-        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-panel-dark/60 border border-border-dark hover:bg-panel-dark transition-colors text-left group"
+        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 hover:bg-slate-100 transition-colors text-left group"
       >
         <span className="material-symbols-outlined text-base text-slate-400 transition-transform duration-200"
           style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}
@@ -93,8 +93,8 @@ export default function CollapsibleSteps({ steps, isActive = false }: Collapsibl
           <span className="size-2 rounded-full bg-emerald-500 shrink-0" />
         )}
 
-        <span className="text-xs text-slate-400 truncate">
-          <span className="text-slate-300 font-medium">
+        <span className="text-xs text-slate-500 truncate">
+          <span className="text-slate-700 font-medium">
             {completedCount} of {steps.length} step{steps.length !== 1 ? 's' : ''} completed
           </span>
           {' '}&mdash; {summaryText}
@@ -110,7 +110,7 @@ export default function CollapsibleSteps({ steps, isActive = false }: Collapsibl
         }}
       >
         <div ref={contentRef} className="pt-2 pl-2">
-          <div className="border-l border-border-dark ml-2 space-y-0">
+          <div className="border-l border-slate-200 ml-2 space-y-0">
             {steps.map((step, i) => (
               <div key={`${step.name}-${i}`} className="relative pl-5 py-1.5">
                 {/* Dot on the timeline */}
@@ -122,19 +122,19 @@ export default function CollapsibleSteps({ steps, isActive = false }: Collapsibl
                   <div className="min-w-0">
                     <span className={`text-xs font-semibold block ${
                       step.status === 'completed' || step.status === 'in_progress'
-                        ? 'text-slate-200'
-                        : 'text-slate-500'
+                        ? 'text-slate-700'
+                        : 'text-slate-400'
                     }`}>
                       {step.name}
                     </span>
                     {step.description && (
-                      <span className="text-[11px] text-slate-500 leading-snug block mt-0.5">
+                      <span className="text-[11px] text-slate-400 leading-snug block mt-0.5">
                         {step.description}
                       </span>
                     )}
                   </div>
                   <span className={`text-[10px] whitespace-nowrap mt-0.5 ${
-                    step.status === 'in_progress' ? 'text-primary' : 'text-slate-600'
+                    step.status === 'in_progress' ? 'text-blue-600' : 'text-slate-400'
                   }`}>
                     {getStatusLabel(step.status)}
                   </span>

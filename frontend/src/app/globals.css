@@ -2,17 +2,17 @@
 @plugin "@tailwindcss/typography";
 
 @theme inline {
-  --color-primary: #2b6cee;
-  --color-bg-dark: #101622;
-  --color-panel-dark: #1a2233;
-  --color-border-dark: #232f48;
-  --color-bg-light: #f6f6f8;
+  --color-primary: #2563eb;
+  --color-bg-main: #f8fafc;
+  --color-panel: #ffffff;
+  --color-border: #e2e8f0;
+  --color-bg-light: #f1f5f9;
   --font-sans: "Public Sans", ui-sans-serif, system-ui, sans-serif;
 }
 
 body {
-  background-color: var(--color-bg-dark);
-  color: #f1f5f9;
+  background-color: #f8fafc;
+  color: #0f172a;
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -33,18 +33,18 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background-color: #232f48;
+  background-color: #cbd5e1;
   border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background-color: #2b6cee;
+  background-color: #94a3b8;
 }
 
 /* Firefox scrollbar */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #232f48 transparent;
+  scrollbar-color: #cbd5e1 transparent;
 }
 
 /* Textarea reset for Tailwind v4 */

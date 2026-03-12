@@ -2,6 +2,8 @@ import { ReasoningStep, AssistantMessageData, TokenUsage } from '@/types';
 
 interface SendMessageCallbacks {
   onReasoningStep: (step: ReasoningStep) => void;
+  onToken?: (content: string) => void;
+  onTokenClear?: () => void;
   onMessage: (msg: AssistantMessageData) => void;
   onMetadata?: (data: TokenUsage) => void;
   onDone?: () => void;
@@ -20,6 +22,12 @@ function processSSEEvent(
     switch (event) {
       case 'reasoning_step':
         callbacks.onReasoningStep(parsed as ReasoningStep);
+        break;
+      case 'token':
+        callbacks.onToken?.(parsed.content as string);
+        break;
+      case 'token_clear':
+        callbacks.onTokenClear?.();
         break;
       case 'message':
         callbacks.onMessage(parsed as AssistantMessageData);

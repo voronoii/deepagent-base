@@ -19,6 +19,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
+from pydantic import create_model, Field
 from langchain_core.tools import StructuredTool
 
 logger = logging.getLogger(__name__)
@@ -255,6 +256,50 @@ class MCPToolManager:
         return session
 
     @staticmethod
+    def _build_args_schema(tool_def: Any) -> type | None:
+        """Build a Pydantic model from an MCP tool's inputSchema.
+
+        This is critical: without an explicit args_schema, LangChain
+        cannot tell the LLM what parameters the tool expects, causing
+        validation errors or hallucinated parameter names.
+        """
+        input_schema = getattr(tool_def, "inputSchema", None)
+        if not input_schema or not isinstance(input_schema, dict):
+            return None
+
+        properties = input_schema.get("properties", {})
+        if not properties:
+            return None
+
+        required = set(input_schema.get("required", []))
+
+        _TYPE_MAP = {
+            "string": str,
+            "integer": int,
+            "number": float,
+            "boolean": bool,
+        }
+
+        fields: dict[str, Any] = {}
+        for fname, prop in properties.items():
+            field_type = _TYPE_MAP.get(prop.get("type", "string"), str)
+            desc = prop.get("description", "")
+            default = prop.get("default", ...)
+
+            if fname in required and default is ...:
+                # Required field with no default
+                fields[fname] = (field_type, Field(description=desc))
+            else:
+                # Optional field
+                if default is ...:
+                    default = None
+                    field_type = field_type | None  # type: ignore[assignment]
+                fields[fname] = (field_type, Field(default=default, description=desc))
+
+        model_name = f"{tool_def.name}_Args"
+        return create_model(model_name, **fields)
+
+    @staticmethod
     def _wrap_mcp_tool(
         server_name: str, session: ClientSession, tool_def: Any
     ) -> StructuredTool:
@@ -269,24 +314,56 @@ class MCPToolManager:
             or f"Tool '{tool_name}' from MCP server '{server_name}'"
         )
 
+        # Build Pydantic schema so the LLM knows exact parameter names/types
+        args_schema = MCPToolManager._build_args_schema(tool_def)
+        if args_schema:
+            logger.info(
+                "  Schema for %s/%s: %s",
+                server_name,
+                tool_name,
+                {k: v.annotation for k, v in args_schema.model_fields.items()},
+            )
+
         async def _call_tool(**kwargs: Any) -> str:
+            logger.info(
+                "MCP call: %s/%s  args=%s",
+                server_name, tool_name, kwargs,
+            )
             try:
                 result = await session.call_tool(tool_name, arguments=kwargs)
+                # Check for MCP-level errors
+                if getattr(result, "isError", False):
+                    error_text = str(result.content) if hasattr(result, "content") else str(result)
+                    logger.error(
+                        "MCP error: %s/%s  error=%s",
+                        server_name, tool_name, error_text[:500],
+                    )
+                    return f"Error calling {tool_name}: {error_text}"
                 # Extract text content from MCP result
                 if hasattr(result, "content") and result.content:
                     texts = []
                     for block in result.content:
                         if hasattr(block, "text"):
                             texts.append(block.text)
-                    return "\n".join(texts) if texts else str(result)
+                    response = "\n".join(texts) if texts else str(result)
+                    logger.info(
+                        "MCP result: %s/%s  length=%d  preview=%s",
+                        server_name, tool_name, len(response), response[:200],
+                    )
+                    return response
                 return str(result)
             except Exception as e:
+                logger.error(
+                    "MCP exception: %s/%s  %s: %s",
+                    server_name, tool_name, type(e).__name__, e,
+                )
                 return f"Error calling {tool_name}: {e}"
 
         return StructuredTool.from_function(
             coroutine=_call_tool,
             name=qualified_name,
             description=description,
+            args_schema=args_schema,
         )
 
 

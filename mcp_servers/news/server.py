@@ -96,3 +96,4 @@ if __name__ == "__main__":
     transport = os.environ.get("MCP_TRANSPORT", "streamable-http")
     print(f"Starting news MCP server on :{os.environ.get('MCP_PORT', '1879')} ({transport})")
     mcp.run(transport=transport)
+ 

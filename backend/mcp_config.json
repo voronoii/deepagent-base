@@ -7,6 +7,14 @@
       "url": "http://localhost:1879/mcp/",
       "url_docker": "http://mcp-news:1879/mcp/",
       "description": "부동산 뉴스 검색 MCP 서버"
+    },
+    {
+      "name": "hug-rag",
+      "enabled": true,
+      "transport": "streamable_http",
+      "url": "http://localhost:1883/mcp/",
+      "url_docker": "http://mcp-hug-rag:1883/mcp/",
+      "description": "전세/부동산 법령 및 전세 보증보험 가이드 검색 (RAG)"
     }
   ]
 }

@@ -10,9 +10,11 @@ PID_DIR="$SCRIPT_DIR/.pids"
 # ── 서버 목록: "디렉토리명 포트" ──
 SERVERS=(
     "news 1879"
+    "apt-metadata 1880"
+    "apt-review 1881"
+    "apt-develop 1882"
+    "hug-rag 1883"
     # 새 MCP 서버 추가 시 여기에 한 줄 추가
-    # "search 8002"
-    # "db 8003"
 )
 
 start_servers() {

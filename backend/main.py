@@ -13,6 +13,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
+
 from backend.schemas import ChatRequest, ReasoningStepData, MessageData, DataCard
 from backend.agent import create_orchestrator
 from backend.mcp_tools import mcp_manager
@@ -81,8 +82,22 @@ def _sse_event(event: str, data) -> dict:
     return {"event": event, "data": json.dumps(data, ensure_ascii=False)}
 
 
-def _extract_tool_display(tool_call: dict) -> tuple[str, str]:
+# Agent display name mapping for user-friendly UI
+_AGENT_DISPLAY: dict[str, tuple[str, str]] = {
+    "research-agent": ("리서치 에이전트", "조사"),
+    "report-writer-agent": ("리포트 작성 에이전트", "작성"),
+}
+
+
+def _extract_tool_display(
+    tool_call: dict, reasoning_text: str = ""
+) -> tuple[str, str]:
     """Extract a human-readable name and description from a tool call.
+
+    Args:
+        tool_call: The tool call dict from AIMessage.
+        reasoning_text: Optional orchestrator reasoning text to use as
+            a user-friendly description instead of raw args.
 
     Returns:
         (display_name, description)
@@ -92,23 +107,35 @@ def _extract_tool_display(tool_call: dict) -> tuple[str, str]:
 
     if name == "task":
         subagent_type = args.get("subagent_type", "agent")
+        display_name, action_verb = _AGENT_DISPLAY.get(
+            subagent_type, (subagent_type, "처리")
+        )
+
+        # Use orchestrator's reasoning text if available
+        if reasoning_text:
+            return display_name, reasoning_text
+
+        # Fallback: generate friendly description from args
         desc = args.get("description", "")
-        if len(desc) > 150:
-            desc = desc[:150] + "..."
-        return f"Sub-Agent: {subagent_type}", desc
+        if desc:
+            short_desc = desc[:80] + "..." if len(desc) > 80 else desc
+            return display_name, f"{action_verb} 중: {short_desc}"
+
+        return display_name, f"{action_verb}를 진행합니다"
+
     elif name == "duckduckgo_search":
         query = args.get("query", args.get("input", ""))
-        return "Web Search", f"Searching: {query}"
+        return "웹 검색", f'"{query}" 검색 중'
     elif name == "write_todos":
-        return "Planning", "Organizing task list"
+        return "작업 계획", "작업 목록을 정리하고 있습니다"
     elif name in ("read_file", "write_file", "edit_file"):
         path = args.get("file_path", args.get("path", ""))
-        return f"File: {name}", f"{path}"
+        return f"파일: {name}", f"{path}"
     elif name == "execute":
         cmd = args.get("command", "")
-        return "Execute", f"Running: {cmd[:100]}" if cmd else "Running command"
+        return "명령 실행", f"실행 중: {cmd[:100]}" if cmd else "명령을 실행합니다"
     elif name in ("ls", "glob", "grep"):
-        return f"Search: {name}", str(args)[:150]
+        return f"검색: {name}", str(args)[:150]
     else:
         return name, str(args)[:150] if args else ""
 
@@ -219,11 +246,16 @@ def _extract_token_usage(msg: AIMessage, source: str = "unknown") -> dict | None
 async def _stream_agent_response(message: str, thread_id: str):
     """Stream agent response as SSE events.
 
-    Uses stream_mode="updates" to capture structured node updates.
+    Uses dual stream_mode=["messages", "updates"]:
+    - "messages" mode: real-time token-by-token streaming via AIMessageChunk
+    - "updates" mode: structured node updates for tool calls and reasoning steps
 
     Event types emitted:
+        - token: Real-time text token for streaming display
+        - token_clear: Signal to clear streamed tokens (tool call detected)
         - reasoning_step: Tool calls, sub-agent invocations, intermediate steps
-        - message: Final AI response with full content
+        - message: Final AI response with full content and metadata
+        - metadata: Token usage information
         - error: Error information
         - done: Stream completion marker
     """
@@ -245,13 +277,53 @@ async def _stream_agent_response(message: str, thread_id: str):
         # Track token usage across the conversation for logging
         _prev_prompt_tokens = 0
         _max_prompt_tokens = 0
+        # Token streaming state
+        _streamed_any = False
 
-        async for chunk in _orchestrator.astream(
+        async for event in _orchestrator.astream(
             input_msg,
             config=config,
-            stream_mode="updates",
+            stream_mode=["messages", "updates"],
         ):
-            # chunk is dict: {node_name: state_update_dict}
+            mode = event[0]
+            chunk = event[1]
+
+            # ── messages mode: real-time token streaming ──────────
+            if mode == "messages":
+                msg, _metadata = chunk
+
+                if isinstance(msg, AIMessageChunk):
+                    # Check for tool call chunks
+                    tool_chunks = getattr(msg, "tool_call_chunks", None) or []
+                    has_tool_chunks = bool(tool_chunks) and any(
+                        tc.get("name") or tc.get("args") for tc in tool_chunks
+                    )
+
+                    if has_tool_chunks:
+                        # Tool call detected — clear any streamed tokens
+                        if _streamed_any:
+                            yield _sse_event("token_clear", {})
+                            _streamed_any = False
+                    else:
+                        # Extract text content from chunk
+                        text = ""
+                        content = msg.content
+                        if isinstance(content, str):
+                            text = content
+                        elif isinstance(content, list):
+                            for part in content:
+                                if isinstance(part, dict) and part.get("type") == "text":
+                                    text += part.get("text", "")
+                                elif isinstance(part, str):
+                                    text += part
+
+                        if text:
+                            yield _sse_event("token", {"content": text})
+                            _streamed_any = True
+
+                continue  # Skip updates processing for messages chunks
+
+            # ── updates mode: structured node events ──────────────
             if not isinstance(chunk, dict):
                 continue
 
@@ -266,9 +338,13 @@ async def _stream_agent_response(message: str, thread_id: str):
                 for msg in messages:
                     # --- AIMessage with tool_calls: emit reasoning steps ---
                     if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                        reasoning_text = _extract_text_content(msg).strip()
+
                         for tc in msg.tool_calls:
                             tc_id = tc.get("id", "")
-                            display_name, description = _extract_tool_display(tc)
+                            display_name, description = _extract_tool_display(
+                                tc, reasoning_text
+                            )
                             pending_tools[tc_id] = display_name
 
                             tc_name = tc.get("name", "unknown")
@@ -302,22 +378,8 @@ async def _stream_agent_response(message: str, thread_id: str):
                                 "timestamp": _now_iso(),
                             })
 
-                        # If there's also text content alongside tool calls,
-                        # emit as intermediate thinking and save as fallback
-                        text = _extract_text_content(msg)
-                        if text.strip():
-                            fallback_text = text
-                            logger.debug(
-                                "Emitting reasoning_step: name=Agent Thinking, "
-                                "text_length=%d",
-                                len(text),
-                            )
-                            yield _sse_event("reasoning_step", {
-                                "name": "Agent Thinking",
-                                "status": "in_progress",
-                                "description": text[:300],
-                                "timestamp": _now_iso(),
-                            })
+                        if reasoning_text:
+                            fallback_text = reasoning_text
 
                         # Emit token usage metadata if available
                         token_usage = _extract_token_usage(msg, source=node_name)

@@ -34,6 +34,7 @@ export default function Home() {
   const [liveReasoningSteps, setLiveReasoningSteps] = useState<ReasoningStep[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null);
+  const [streamingText, setStreamingText] = useState('');
   const threadIdRef = useRef<string>('');
   const currentStepsRef = useRef<ReasoningStep[]>([]);
 
@@ -54,6 +55,7 @@ export default function Home() {
     setMessages((prev) => [...prev, userMessage]);
     setReasoningSteps([]);
     setLiveReasoningSteps([]);
+    setStreamingText('');
     currentStepsRef.current = [];
     setIsLoading(true);
 
@@ -67,6 +69,12 @@ export default function Home() {
 
         // Keep the right panel in sync
         setReasoningSteps((prev) => updateStepsList(prev, step));
+      },
+      onToken: (content: string) => {
+        setStreamingText((prev) => prev + content);
+      },
+      onTokenClear: () => {
+        setStreamingText('');
       },
       onMetadata: (data: TokenUsage) => {
         setTokenUsage(data);
@@ -85,8 +93,9 @@ export default function Home() {
         };
         setMessages((prev) => [...prev, assistantMessage]);
 
-        // Clear live steps since they are now embedded in the message
+        // Clear live steps and streaming text since message is finalized
         setLiveReasoningSteps([]);
+        setStreamingText('');
         currentStepsRef.current = [];
       },
       onDone: () => {
@@ -109,6 +118,7 @@ export default function Home() {
         };
         setMessages((prev) => [...prev, errorMessage]);
         setLiveReasoningSteps([]);
+        setStreamingText('');
         currentStepsRef.current = [];
         setIsLoading(false);
       },
@@ -116,12 +126,13 @@ export default function Home() {
   }, [isLoading]);
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="flex h-screen overflow-hidden bg-slate-50">
       <Sidebar />
       <ChatArea
         messages={messages}
         isLoading={isLoading}
         liveReasoningSteps={liveReasoningSteps}
+        streamingText={streamingText}
         onSend={handleSend}
         tokenUsage={tokenUsage}
       />

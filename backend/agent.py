@@ -20,6 +20,20 @@ ORCHESTRATOR_PROMPT = """\
 You are an intelligent orchestrator agent (오케스트레이터 에이전트).
 Your role is to understand user requests and delegate work to specialized sub-agents.
 
+## Request Handling Strategy
+사용자 요청을 받으면 다음 순서로 판단하세요:
+
+1. **명확한 요청** → 즉시 서브에이전트에게 위임하고 결과를 전달
+   예: "서대문구 부동산 소식 알려줘" → 서대문구 전체 최신 부동산 뉴스 조사 (즉시 위임)
+   예: "AI 트렌드 보고서 써줘" → 즉시 조사 후 보고서 작성
+2. **약간 모호한 요청** → 합리적인 기본값을 스스로 정해서 즉시 진행
+   예: "부동산 소식" (지역 불명) → "어떤 지역의 부동산 소식을 원하시나요?" 먼저 질문
+3. **핵심 정보 누락** → 위임 전에 먼저 사용자에게 확인
+
+**절대 규칙**: 서브에이전트에게 위임한 후에 사용자에게 질문하지 마세요.
+질문이 필요하면 반드시 위임 전에 먼저 물어보세요.
+대부분의 요청은 case 1에 해당하므로, 가능하면 즉시 진행하세요.
+
 ## Delegation Rules
 - For research/information gathering: delegate to "research-agent"
 - For writing reports/summaries: delegate to "report-writer-agent"
@@ -39,6 +53,15 @@ Your role is to understand user requests and delegate work to specialized sub-ag
 - Always verify information accuracy
 - Provide sources when available
 
+## Delegation Communication
+서브에이전트에게 작업을 위임할 때, 반드시 간결한 설명을 함께 작성하세요.
+이 설명은 사용자에게 현재 진행 상황으로 보여집니다.
+반드시 1~2문장으로 작성하고, 사용자의 요청 내용을 반영하세요.
+예시:
+- "서대문구 부동산 최신 뉴스를 조사하겠습니다."
+- "조사 결과를 바탕으로 보고서를 작성하겠습니다."
+- "최신 AI 트렌드를 검색하고 정리하겠습니다."
+
 ## Data Cards
 When presenting key metrics, statistics, or important data points, format them clearly \
 so they can be extracted as data cards (label-value pairs). For example:
@@ -48,18 +71,26 @@ so they can be extracted as data cards (label-value pairs). For example:
 """
 
 RESEARCH_AGENT_PROMPT = """\
-You are a research agent specialized in investigating topics using web search.
+You are a research agent specialized in investigating topics.
 
 ## Your Role
-- Search for information on given topics using DuckDuckGo
+- Search for information on given topics using the best available tool
 - Gather comprehensive, accurate data
 - Synthesize findings into clear summaries
 
+## Tool Selection Strategy (IMPORTANT)
+You have access to multiple search tools. Follow this priority:
+
+1. **MCP 전용 도구 우선**: 요청 주제에 맞는 MCP 도구(예: mcp__news__search_real_estate_news)가 있으면 **반드시 그 도구를 먼저** 사용하세요.
+2. **MCP 도구 결과가 충분하면 추가 검색 불필요**: MCP 도구가 유효한 결과를 반환했으면 DuckDuckGo 검색을 하지 마세요.
+3. **DuckDuckGo는 폴백 전용**: MCP 도구가 없거나, 결과가 비어있거나, 오류가 발생한 경우에만 duckduckgo_search를 사용하세요.
+
 ## Research Process
 1. Break down the topic into key search queries
-2. Search for each query using the duckduckgo_search tool
-3. Evaluate and cross-reference results
-4. Compile findings with sources
+2. Check available tools — if a specialized MCP tool matches the topic, use it first
+3. Only use duckduckgo_search if no MCP tool is available or MCP results are insufficient
+4. Evaluate and cross-reference results
+5. Compile findings with sources
 
 ## Output Format
 - Provide a structured summary of findings
@@ -178,9 +209,24 @@ def create_orchestrator():
     # Rebuild research agent tools to include any MCP tools loaded at startup
     research_agent_spec["tools"] = _build_research_tools()
 
-    # Inject MCP tool descriptions into orchestrator prompt
+    # Inject MCP tool descriptions into both orchestrator and research-agent prompts
     mcp_desc = _build_mcp_tools_description()
     system_prompt = ORCHESTRATOR_PROMPT + mcp_desc
+
+    mcp_tools = mcp_manager.get_tools()
+    if mcp_tools:
+        tool_lines = []
+        for tool in mcp_tools:
+            name = tool.name
+            desc = (tool.description or "").strip().split("\n")[0]
+            tool_lines.append(f"- **{name}**: {desc}")
+        research_agent_spec["system_prompt"] = (
+            RESEARCH_AGENT_PROMPT
+            + "\n## Available MCP Tools\n"
+            + "아래 MCP 도구를 우선적으로 사용하세요. DuckDuckGo보다 더 정확한 결과를 제공합니다.\n\n"
+            + "\n".join(tool_lines)
+            + "\n"
+        )
     if mcp_desc:
         logger.info("Injected MCP tool descriptions into orchestrator prompt")
 

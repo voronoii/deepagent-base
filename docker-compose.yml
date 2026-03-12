@@ -5,6 +5,9 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - MODEL_TYPE=${MODEL_TYPE:-vllm}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
       - VLLM_BASE_URL=${VLLM_BASE_URL:-http://10.1.61.227:8002/v1}
       - AGENT_ROOT_DIR=/app
       - DOCKER_ENV=1
@@ -31,7 +34,7 @@ services:
     environment:
       - MCP_PORT=1879
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:1879/mcp/')"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',1879),timeout=2); s.close()"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -40,18 +43,104 @@ services:
     networks:
       - deepagent
 
+  mcp-apt-metadata:
+    build:
+      context: ./mcp_servers
+      args:
+        TOOL_DIR: apt-metadata
+    ports:
+      - "1880:1880"
+    environment:
+      - MCP_PORT=1880
+      - APT_METADATA_PKL=${APT_METADATA_PKL:-/DATA3/users/mj/spatial/data/total_apt_list_0716_df.pkl}
+      - DONG_EXCEL_PATH=${DONG_EXCEL_PATH:-/DATA3/users/mj/spatial/crawl_hogang/data/서울시_법정동_호갱노노id_위경도.xlsx}
+      - QDRANT_HOST=${QDRANT_HOST:-localhost}
+      - QDRANT_PORT=${QDRANT_PORT:-7000}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-apt_reviews}
+      - EMBED_MODEL=${EMBED_MODEL:-/DATA3/users/mj/hf_models/snowflake-arctic-embed-l-v2.0-ko}
+      - EMBED_SERVER_URL=${EMBED_SERVER_URL:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',1880),timeout=2); s.close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - deepagent
+
+  mcp-apt-review:
+    build:
+      context: ./mcp_servers
+      args:
+        TOOL_DIR: apt-review
+    ports:
+      - "1881:1881"
+    environment:
+      - MCP_PORT=1881
+      - QDRANT_HOST=${QDRANT_HOST:-localhost}
+      - QDRANT_PORT=${QDRANT_PORT:-7000}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-apt_reviews}
+      - EMBED_MODEL=${EMBED_MODEL:-/DATA3/users/mj/hf_models/snowflake-arctic-embed-l-v2.0-ko}
+      - EMBED_SERVER_URL=${EMBED_SERVER_URL:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',1881),timeout=2); s.close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - deepagent
+
+  mcp-apt-develop:
+    build:
+      context: ./mcp_servers
+      args:
+        TOOL_DIR: apt-develop
+    ports:
+      - "1882:1882"
+    environment:
+      - MCP_PORT=1882
+      - BEOPJUNGDONG_TXT=${BEOPJUNGDONG_TXT:-/DATA3/users/mj/spatial/data/법정동코드 전체자료.txt}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',1882),timeout=2); s.close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - deepagent
+
+  mcp-hug-rag:
+    build:
+      context: ./mcp_servers
+      args:
+        TOOL_DIR: hug-rag
+    ports:
+      - "1883:1883"
+    environment:
+      - MCP_PORT=1883
+      - QDRANT_HOST=${QDRANT_HOST:-localhost}
+      - QDRANT_PORT=${QDRANT_PORT:-7000}
+      - QDRANT_COLLECTION=hug_docs
+      - EMBED_MODEL=/models/snowflake-arctic-embed-l-v2.0-ko
+      - RERANKER_MODEL=/models/bge-reranker-v2-m3-ko
+    volumes:
+      - /DATA3/users/mj/hf_models/snowflake-arctic-embed-l-v2.0-ko:/models/snowflake-arctic-embed-l-v2.0-ko:ro
+      - /DATA3/users/mj/hf_models/bge-reranker-v2-m3-ko:/models/bge-reranker-v2-m3-ko:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',1883),timeout=2); s.close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - deepagent
+
   # 새 MCP 서버 추가 시 여기에 복사 후 수정
-  # mcp-search:
-  #   build:
-  #     context: ./mcp_servers
-  #     args:
-  #       TOOL_DIR: search
-  #   ports:
-  #     - "8002:8001"
-  #   environment:
-  #     - MCP_PORT=8001
-  #   networks:
-  #     - deepagent
 
   frontend:
     build:
@@ -59,7 +148,7 @@ services:
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports:
-      - "3000:3000"
+      - "3111:3111"
     depends_on:
       backend:
         condition: service_healthy

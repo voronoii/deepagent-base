@@ -2,7 +2,6 @@
 
 import { ReasoningStep } from '@/types';
 import ReasoningStepItem from './ReasoningStepItem';
-import MetadataPanel from './MetadataPanel';
 
 interface ReasoningPanelProps {
   steps: ReasoningStep[];
@@ -11,11 +10,11 @@ interface ReasoningPanelProps {
 
 export default function ReasoningPanel({ steps, isActive = false }: ReasoningPanelProps) {
   return (
-    <aside className="w-80 border-l border-border-dark bg-bg-dark overflow-y-auto hidden xl:block">
+    <aside className="w-80 border-l border-slate-200 bg-white overflow-y-auto hidden xl:block">
       <div className="p-6">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-sm font-bold uppercase tracking-widest text-slate-500">
+          <h2 className="text-sm font-bold uppercase tracking-widest text-slate-400">
             Agent Reasoning
           </h2>
           {isActive && (
@@ -36,17 +35,15 @@ export default function ReasoningPanel({ steps, isActive = false }: ReasoningPan
           </div>
         ) : (
           <div className="text-center py-12">
-            <span className="material-symbols-outlined text-4xl text-slate-600 mb-3 block">
+            <span className="material-symbols-outlined text-4xl text-slate-300 mb-3 block">
               psychology
             </span>
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-slate-400">
               Reasoning steps will appear here when processing a query.
             </p>
           </div>
         )}
 
-        {/* Metadata */}
-        <MetadataPanel />
       </div>
     </aside>
   );
