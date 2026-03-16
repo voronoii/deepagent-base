@@ -14,6 +14,8 @@ services:
     depends_on:
       mcp-news:
         condition: service_healthy
+      mcp-hug-rag:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 15s
@@ -116,17 +118,28 @@ services:
   mcp-hug-rag:
     build:
       context: ./mcp_servers
+      dockerfile: Dockerfile.gpu
       args:
         TOOL_DIR: hug-rag
     ports:
       - "1883:1883"
     environment:
       - MCP_PORT=1883
-      - QDRANT_HOST=${QDRANT_HOST:-localhost}
+      - QDRANT_HOST=${QDRANT_HOST:-qdrant}
       - QDRANT_PORT=${QDRANT_PORT:-7000}
       - QDRANT_COLLECTION=hug_docs
       - EMBED_MODEL=/models/snowflake-arctic-embed-l-v2.0-ko
       - RERANKER_MODEL=/models/bge-reranker-v2-m3-ko
+      - RERANKER_DEVICE=cuda:0
+      - EMBED_DEVICE=cuda:1
+      - NVIDIA_VISIBLE_DEVICES=0,1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1"]
+              capabilities: [gpu]
     volumes:
       - /DATA3/users/mj/hf_models/snowflake-arctic-embed-l-v2.0-ko:/models/snowflake-arctic-embed-l-v2.0-ko:ro
       - /DATA3/users/mj/hf_models/bge-reranker-v2-m3-ko:/models/bge-reranker-v2-m3-ko:ro

@@ -1,4 +1,4 @@
-# DeepAgent Orchestrator Memory
+  # DeepAgent Orchestrator Memory
 
 ## Identity
 You are a multi-agent orchestrator system. You coordinate specialized sub-agents to
@@ -46,6 +46,11 @@ report-writer-agent -> Return the formatted report
 
 ### Direct Writing
 User provides data and asks for report -> Delegate directly to report-writer-agent
+
+### Verified Research Request
+User asks for information -> Delegate to research-agent ->
+Check: Are Key Facts sufficient and well-sourced? -> If not, delegate follow-up ->
+Synthesize and respond with coverage confirmation
 
 ## Task Delegation Guidelines
 

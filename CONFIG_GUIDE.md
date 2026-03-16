@@ -52,6 +52,7 @@ QDRANT_PORT=7000                              # Qdrant 포트
 | `VLLM_MAX_CONTEXT_TOKENS` | (하드코딩) | `32,768` | vLLM 모델 컨텍스트 윈도우 크기 |
 | `AGENT_ROOT_DIR` | `AGENT_ROOT_DIR` | `/DATA3/users/mj/DeepAgent-Base` | 에이전트 루트 디렉토리 (Docker 내에서는 `/app`) |
 | `AGENTS_MD_PATH` | (하드코딩) | `./backend/AGENTS.md` | 에이전트 메모리 파일 경로 |
+| `SKILL_DIR` | (하드코딩) | `./backend/skills/` | 도구 사용법들을 담은 폴더 경로 |
 
 > **참고**: Docker 환경에서는 `docker-compose.yml`의 `environment`에서 `AGENT_ROOT_DIR=/app`으로 자동 설정됩니다.
 
@@ -233,19 +234,69 @@ volumes:
 
 ---
 
-## 5. `mcp_servers/Dockerfile` — MCP 서버 공통 Dockerfile
+## 5. `mcp_servers/Dockerfile` — MCP 서버 Dockerfile
+
+### 5.1 CPU 전용 (`Dockerfile`) — 기본
+
+GPU가 필요 없는 MCP 서버(news, apt-metadata 등)에서 사용합니다.
 
 ```dockerfile
 FROM python:3.11-slim
-ARG TOOL_DIR                    # docker-compose의 build.args.TOOL_DIR로 주입
+ARG TOOL_DIR
 WORKDIR /app
 COPY ${TOOL_DIR}/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY ${TOOL_DIR}/ .
-ENV MCP_HOST=0.0.0.0            # 모든 인터페이스에서 리슨
-ENV MCP_TRANSPORT=streamable-http  # MCP 전송 방식
+ENV MCP_HOST=0.0.0.0
+ENV MCP_TRANSPORT=streamable-http
 CMD ["python", "server.py"]
 ```
+
+### 5.2 GPU 전용 (`Dockerfile.gpu`) — CUDA 필요 시
+
+임베딩/리랭커 등 GPU 추론이 필요한 MCP 서버(hug-rag 등)에서 사용합니다.
+`pytorch/pytorch` 공식 이미지를 베이스로 하여 CUDA + PyTorch가 사전 포함되어 있습니다.
+
+```dockerfile
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+ARG TOOL_DIR
+WORKDIR /app
+COPY ${TOOL_DIR}/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY ${TOOL_DIR}/ .
+ENV MCP_HOST=0.0.0.0
+ENV MCP_TRANSPORT=streamable-http
+CMD ["python", "server.py"]
+```
+
+**docker-compose.yml에서 GPU Dockerfile 지정:**
+
+```yaml
+mcp-hug-rag:
+  build:
+    context: ./mcp_servers
+    dockerfile: Dockerfile.gpu        # GPU용 Dockerfile 지정
+    args:
+      TOOL_DIR: hug-rag
+  environment:
+    - RERANKER_DEVICE=cuda:0          # 리랭커 → GPU 0번
+    - EMBED_DEVICE=cuda:1             # 임베딩 → GPU 1번
+    - NVIDIA_VISIBLE_DEVICES=0,1      # 컨테이너에 노출할 GPU
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ["0", "1"]    # 정확한 GPU 번호 지정
+            capabilities: [gpu]
+```
+
+> **⚠️ GPU 할당 시 주의사항:**
+> - `count: N`은 "아무 GPU N개"를 할당합니다. 특정 GPU를 지정하려면 `device_ids`를 사용하세요.
+> - 호스트에 `nvidia-container-toolkit`이 설치되어 있어야 합니다.
+> - `python:3.11-slim` 베이스 이미지에는 CUDA가 없으므로, GPU가 필요한 서비스는 반드시 `Dockerfile.gpu`를 사용해야 합니다.
+
+### 5.3 Dockerfile 공통 설정
 
 | 설정 | 설명 |
 |------|------|
