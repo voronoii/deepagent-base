@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>DeepAgent Workflow Graph</title>
+<style>
+  body { background: #1a1a2e; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; font-family: sans-serif; }
+  .container { text-align: center; }
+  h1 { color: #e0e0e0; font-size: 1.2rem; margin-bottom: 1rem; }
+  .mermaid { background: #16213e; padding: 2rem; border-radius: 12px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>DeepAgent LangGraph Workflow</h1>
+  <div class="mermaid">
+---
+config:
+  flowchart:
+    curve: linear
+  theme: dark
+---
+graph TD;
+	__start__([__start__]):::first
+	orchestrator(orchestrator<br/><i>RetryPolicy: max=2</i><br/><i>TimeoutError, ConnectionError, OSError</i>)
+	fallback(fallback<br/><i>research-agent direct</i>)
+	__end__([__end__]):::last
+	__start__ --> orchestrator;
+	orchestrator -. "end (success)" .-> __end__;
+	orchestrator -. "fallback (retry > 2)" .-> fallback;
+	fallback --> __end__;
+	orchestrator -. "retry (retry ≤ 2)" .-> orchestrator;
+	classDef default fill:#2d3250,stroke:#7077A1,color:#F6F4EB,line-height:1.2
+	classDef first fill:#424769,stroke:#7077A1,color:#F6F4EB
+	classDef last fill:#7077A1,stroke:#F6B17A,color:#F6F4EB
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true, theme:'dark'});</script>
+</body>
+</html>

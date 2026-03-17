@@ -34,12 +34,7 @@ export default function AssistantMessage({ data, reasoningSteps }: AssistantMess
             )}
             {(data.source || data.processingTime) && (
               <div className="mt-4 pt-4 border-t border-slate-100 flex items-center gap-4 text-xs text-slate-400">
-                {data.source && (
-                  <span className="flex items-center gap-1">
-                    <span className="material-symbols-outlined text-sm">verified</span>
-                    Verified Source: {data.source}
-                  </span>
-                )}
+                
                 {data.processingTime && (
                   <span className="flex items-center gap-1">
                     <span className="material-symbols-outlined text-sm">schedule</span>

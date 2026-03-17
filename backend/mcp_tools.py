@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from contextlib import AsyncExitStack
 from typing import Any
+
+from backend import agent_logger
 from urllib.parse import urlparse
 
 from mcp import ClientSession, StdioServerParameters
@@ -24,7 +26,7 @@ from langchain_core.tools import StructuredTool
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(__file__).parent / "mcp_config.json"
+CONFIG_PATH = Path(__file__).parent /"config"/ "mcp_config.json"
 
 
 class MCPToolManager:
@@ -325,19 +327,15 @@ class MCPToolManager:
             )
 
         async def _call_tool(**kwargs: Any) -> str:
-            logger.info(
-                "MCP call: %s/%s  args=%s",
-                server_name, tool_name, kwargs,
-            )
+            agent_logger.mcp_call(server_name, tool_name, kwargs)
+            t0 = time.monotonic()
             try:
                 result = await session.call_tool(tool_name, arguments=kwargs)
+                elapsed = time.monotonic() - t0
                 # Check for MCP-level errors
                 if getattr(result, "isError", False):
                     error_text = str(result.content) if hasattr(result, "content") else str(result)
-                    logger.error(
-                        "MCP error: %s/%s  error=%s",
-                        server_name, tool_name, error_text[:500],
-                    )
+                    agent_logger.mcp_error(server_name, tool_name, error_text[:500])
                     return f"Error calling {tool_name}: {error_text}"
                 # Extract text content from MCP result
                 if hasattr(result, "content") and result.content:
@@ -346,16 +344,15 @@ class MCPToolManager:
                         if hasattr(block, "text"):
                             texts.append(block.text)
                     response = "\n".join(texts) if texts else str(result)
-                    logger.info(
-                        "MCP result: %s/%s  length=%d  preview=%s",
-                        server_name, tool_name, len(response), response[:200],
+                    agent_logger.mcp_result(
+                        server_name, tool_name, len(response),
+                        response[:200], elapsed,
                     )
                     return response
                 return str(result)
             except Exception as e:
-                logger.error(
-                    "MCP exception: %s/%s  %s: %s",
-                    server_name, tool_name, type(e).__name__, e,
+                agent_logger.mcp_error(
+                    server_name, tool_name, f"{type(e).__name__}: {e}",
                 )
                 return f"Error calling {tool_name}: {e}"
 

@@ -18,6 +18,7 @@ from backend.schemas import ChatRequest, ReasoningStepData, MessageData, DataCar
 from backend.agent import create_orchestrator
 from backend.mcp_tools import mcp_manager
 from backend.config import MAX_CONTEXT_TOKENS
+from backend import agent_logger
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,13 @@ async def startup_event():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    # Set up colored agent trace logger
+    agent_logger.setup_trace_logger()
+
+    # Suppress noisy loggers that drown agent logs
+    for noisy in ("httpx", "primp", "ddgs", "ddgs.ddgs", "mcp.client.streamable_http"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     # Initialize MCP server connections first so tools are available
     logger.info("Initializing MCP server connections...")
     await mcp_manager.initialize()
@@ -86,6 +94,7 @@ def _sse_event(event: str, data) -> dict:
 _AGENT_DISPLAY: dict[str, tuple[str, str]] = {
     "research-agent": ("리서치 에이전트", "조사"),
     "report-writer-agent": ("리포트 작성 에이전트", "작성"),
+    "risk-assessment-agent": ("전세 조항 위험도 분석 에이전트", "분석"),
 }
 
 
@@ -228,13 +237,11 @@ def _extract_token_usage(msg: AIMessage, source: str = "unknown") -> dict | None
             }
 
     if result:
-        logger.info(
-            "Token usage [%s]: prompt=%d, completion=%d, total=%d (%.0f%% of %d)",
+        agent_logger.token_usage(
             source,
             result["promptTokens"],
             result["completionTokens"],
             result["totalTokens"],
-            (result["promptTokens"] / MAX_CONTEXT_TOKENS * 100) if MAX_CONTEXT_TOKENS else 0,
             MAX_CONTEXT_TOKENS,
         )
 
@@ -260,18 +267,17 @@ async def _stream_agent_response(message: str, thread_id: str):
         - done: Stream completion marker
     """
     start_time = time.monotonic()
-    logger.info(
-        "Orchestrator start processing — thread=%s, message_length=%d",
-        thread_id,
-        len(message),
+    agent_logger.lifecycle(
+        "orchestrator", "START",
+        f"thread={thread_id}, message_length={len(message)}",
     )
 
     try:
         config = {"configurable": {"thread_id": thread_id}}
         input_msg = {"messages": [{"role": "user", "content": message}]}
 
-        # Track pending tool calls: tool_call_id -> display_name
-        pending_tools: dict[str, str] = {}
+        # Track pending tool calls: tool_call_id -> {display_name, is_subagent, agent_type}
+        pending_tools: dict[str, dict] = {}
         final_text = ""
         fallback_text = ""
         # Track token usage across the conversation for logging
@@ -345,26 +351,23 @@ async def _stream_agent_response(message: str, thread_id: str):
                             display_name, description = _extract_tool_display(
                                 tc, reasoning_text
                             )
-                            pending_tools[tc_id] = display_name
-
                             tc_name = tc.get("name", "unknown")
-                            tc_args_str = str(tc.get("args", {}))
-                            logger.info(
-                                "Tool call: name=%s, args=%s",
-                                tc_name,
-                                tc_args_str[:200],
-                            )
-                            if tc_name == "task":
-                                subagent_type = tc.get("args", {}).get(
-                                    "subagent_type", "unknown"
+                            tc_args = tc.get("args", {})
+                            is_subagent = tc_name == "task"
+                            subagent_type = tc_args.get("subagent_type", "") if is_subagent else ""
+                            pending_tools[tc_id] = {
+                                "display_name": display_name,
+                                "is_subagent": is_subagent,
+                                "agent_type": subagent_type,
+                            }
+                            if is_subagent:
+                                task_desc = tc_args.get("description", "")
+                                agent_logger.handoff(
+                                    node_name, subagent_type, task_desc
                                 )
-                                task_desc = tc.get("args", {}).get(
-                                    "description", ""
-                                )
-                                logger.info(
-                                    "Sub-agent invocation: agent=%s, task=%s",
-                                    subagent_type,
-                                    task_desc[:150],
+                            else:
+                                agent_logger.tool_call(
+                                    node_name, tc_name, tc_args
                                 )
 
                             logger.debug(
@@ -399,20 +402,25 @@ async def _stream_agent_response(message: str, thread_id: str):
                     elif isinstance(msg, ToolMessage):
                         tc_id = getattr(msg, "tool_call_id", "")
                         tool_name = getattr(msg, "name", "")
-                        display_name = pending_tools.pop(tc_id, tool_name or "Tool")
+                        tool_info = pending_tools.pop(
+                            tc_id,
+                            {"display_name": tool_name or "Tool", "is_subagent": False, "agent_type": ""},
+                        )
+                        display_name = tool_info["display_name"]
 
                         content_str = str(msg.content) if msg.content else ""
                         preview = content_str[:200]
 
-                        logger.info(
-                            "Sub-agent/tool completed: name=%s, result_length=%d",
-                            display_name,
-                            len(content_str),
-                        )
-                        logger.debug(
-                            "Emitting reasoning_step: name=%s, status=completed",
-                            display_name,
-                        )
+                        if tool_info["is_subagent"]:
+                            agent_logger.response(
+                                tool_info["agent_type"] or display_name,
+                                content_str,
+                                len(content_str),
+                            )
+                        else:
+                            agent_logger.tool_result(
+                                node_name, display_name, len(content_str)
+                            )
                         yield _sse_event("reasoning_step", {
                             "name": display_name,
                             "status": "completed",
@@ -463,11 +471,8 @@ async def _stream_agent_response(message: str, thread_id: str):
             if final_text is fallback_text:
                 source = "orchestrator (partial)"
 
-            logger.info(
-                "Emitting message event — source=%s, length=%d, elapsed=%.1fs",
-                source,
-                len(final_text),
-                elapsed,
+            agent_logger.response(
+                "orchestrator", final_text, len(final_text)
             )
             yield _sse_event("message", {
                 "role": "assistant",
@@ -484,7 +489,8 @@ async def _stream_agent_response(message: str, thread_id: str):
 
     except Exception as e:
         elapsed = time.monotonic() - start_time
-        logger.error("Agent streaming error after %.1fs: %s", elapsed, traceback.format_exc())
+        agent_logger.error("orchestrator", f"Streaming error after {elapsed:.1f}s: {e}")
+        logger.debug("Traceback: %s", traceback.format_exc())
 
         # If we captured intermediate content, emit it before the error
         # so the user sees partial results.
@@ -510,10 +516,9 @@ async def _stream_agent_response(message: str, thread_id: str):
 
     finally:
         elapsed = time.monotonic() - start_time
-        logger.info(
-            "Emitting done event — thread=%s, total_elapsed=%.1fs",
-            thread_id,
-            elapsed,
+        agent_logger.lifecycle(
+            "orchestrator", "DONE",
+            f"thread={thread_id}, elapsed={elapsed:.1f}s",
         )
         if _max_prompt_tokens > 0:
             usage_pct = _max_prompt_tokens / MAX_CONTEXT_TOKENS * 100

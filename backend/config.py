@@ -20,7 +20,7 @@ VLLM_MAX_CONTEXT_TOKENS = 32_768
 
 # ── Common settings ──────────────────────────────────────────
 AGENT_ROOT_DIR = os.environ.get("AGENT_ROOT_DIR", "/DATA3/users/mj/DeepAgent-Base")
-AGENTS_MD_PATH = "./backend/AGENTS.md"
+AGENTS_MD_PATH = "./backend/config/AGENTS.md"
 SKILLS_DIR = "./backend/skills/"
 
 # Dynamic context window based on selected model
