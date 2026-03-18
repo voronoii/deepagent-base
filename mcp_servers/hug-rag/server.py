@@ -1,5 +1,6 @@
 """HUG RAG MCP server - 전세/부동산 법령·가이드 검색 도구."""
 
+import asyncio
 import logging
 import os
 import threading
@@ -40,6 +41,8 @@ _embed_lock = threading.Lock()
 _reranker = None
 _reranker_lock = threading.Lock()
 _client = None
+_embed_gpu_lock = threading.Lock()  # 임베딩 GPU 직렬화 (cuda:1)
+_rerank_gpu_lock = threading.Lock()  # 리랭킹 GPU 직렬화 (cuda:0)
 
 
 def _get_embed_model():
@@ -50,7 +53,9 @@ def _get_embed_model():
                 from sentence_transformers import SentenceTransformer
 
                 logger.info("임베딩 모델 로드: %s", EMBED_MODEL_PATH)
-                _embed_model = SentenceTransformer(EMBED_MODEL_PATH, device=EMBED_DEVICE)
+                _embed_model = SentenceTransformer(
+                    EMBED_MODEL_PATH, device=EMBED_DEVICE
+                )
     return _embed_model
 
 
@@ -63,7 +68,9 @@ def _get_reranker():
                     from sentence_transformers import CrossEncoder
 
                     logger.info("리랭커 모델 로드: %s", RERANKER_MODEL_PATH)
-                    _reranker = CrossEncoder(RERANKER_MODEL_PATH, device=RERANKER_DEVICE)
+                    _reranker = CrossEncoder(
+                        RERANKER_MODEL_PATH, device=RERANKER_DEVICE
+                    )
                 except Exception as e:
                     logger.warning("리랭커 로드 실패 (dense만 사용): %s", e)
                     _reranker = "unavailable"
@@ -89,7 +96,9 @@ def _rerank(query: str, docs: List[Dict[str, Any]], limit: int) -> List[Dict[str
     if reranker == "unavailable" or not docs:
         return docs[:limit]
 
-    pairs = [[query, d.get("text_for_rerank", d.get("조문/섹션내용", ""))] for d in docs]
+    pairs = [
+        [query, d.get("text_for_rerank", d.get("조문/섹션내용", ""))] for d in docs
+    ]
     scores = reranker.predict(pairs)
 
     for i, doc in enumerate(docs):
@@ -113,7 +122,9 @@ def _format_result(sp, include_full_text: bool = False) -> Dict[str, Any]:
         "도메인": pl.get("domain", "N/A"),
         "문서제목": pl.get("title", "N/A"),
         "조문/섹션명": pl.get("sub_title", "N/A"),
-        "조문/섹션내용": text if include_full_text else (text[:500] + "..." if len(text) > 500 else text),
+        "조문/섹션내용": text
+        if include_full_text
+        else (text[:500] + "..." if len(text) > 500 else text),
         "카테고리": pl.get("category", "N/A"),
         "출처파일": pl.get("source_file", "N/A"),
     }
@@ -123,8 +134,67 @@ def _format_result(sp, include_full_text: bool = False) -> Dict[str, Any]:
 
 
 # ── MCP 도구 ────────────────────────────────────────
+def _search_hug_docs_sync(
+    query_text: str,
+    domain: str,
+    title_filter: str,
+    limit: int,
+) -> dict:
+    """search_hug_docs의 동기 구현."""
+    t0 = time.time()
+    client = _get_client()
+
+    filter_conditions: List[models.Condition] = []
+    if domain:
+        filter_conditions.append(
+            models.FieldCondition(key="domain", match=models.MatchValue(value=domain))
+        )
+    if title_filter:
+        filter_conditions.append(
+            models.FieldCondition(
+                key="title", match=models.MatchText(text=title_filter)
+            )
+        )
+    search_filter = models.Filter(must=filter_conditions) if filter_conditions else None
+
+    with _embed_gpu_lock:
+        query_vector = _embed(query_text)
+
+    search_result = client.query_points(
+        collection_name=COLLECTION,
+        query=query_vector,
+        query_filter=search_filter,
+        limit=RETRIEVAL_TOP_K,
+        with_payload=True,
+    )
+    hits = search_result.points
+
+    if not hits:
+        return {
+            "소요시간": f"{time.time() - t0:.2f}초",
+            "검색개수": 0,
+            "결과": [],
+            "메시지": "검색 결과가 없습니다.",
+        }
+
+    results = []
+    for sp in hits:
+        formatted = _format_result(sp)
+        formatted["text_for_rerank"] = (sp.payload or {}).get("text", "")
+        results.append(formatted)
+
+    with _rerank_gpu_lock:
+        results = _rerank(query_text, results, limit)
+
+    return {
+        "소요시간": f"{time.time() - t0:.2f}초",
+        "검색개수": len(results),
+        "결과": results,
+    }
+
+
 @mcp.tool()
-def search_hug_docs(
+async def search_hug_docs(
     query_text: str,
     domain: str = "",
     title_filter: str = "",
@@ -148,78 +218,32 @@ def search_hug_docs(
     """
     logger.info(
         "search_hug_docs called: query_text=%r, domain=%r, title_filter=%r, limit=%d",
-        query_text, domain, title_filter, limit,
+        query_text,
+        domain,
+        title_filter,
+        limit,
     )
-    t0 = time.time()
-    client = _get_client()
-
-    # 필터 조건 구성
-    filter_conditions: List[models.Condition] = []
-
-    if domain:
-        filter_conditions.append(
-            models.FieldCondition(key="domain", match=models.MatchValue(value=domain))
-        )
-    if title_filter:
-        filter_conditions.append(
-            models.FieldCondition(key="title", match=models.MatchText(text=title_filter))
-        )
-
-    search_filter = models.Filter(must=filter_conditions) if filter_conditions else None
-
-    # dense 벡터 검색
-    query_vector = _embed(query_text)
-    search_result = client.query_points(
-        collection_name=COLLECTION,
-        query=query_vector,
-        query_filter=search_filter,
-        limit=RETRIEVAL_TOP_K,
-        with_payload=True,
+    return await asyncio.to_thread(
+        _search_hug_docs_sync,
+        query_text,
+        domain,
+        title_filter,
+        limit,
     )
-    hits = search_result.points
-
-    if not hits:
-        return {
-            "소요시간": f"{time.time() - t0:.2f}초",
-            "검색개수": 0,
-            "결과": [],
-            "메시지": "검색 결과가 없습니다.",
-        }
-
-    # 결과 포맷팅
-    results = []
-    for sp in hits:
-        formatted = _format_result(sp)
-        formatted["text_for_rerank"] = (sp.payload or {}).get("text", "")
-        results.append(formatted)
-
-    # 리랭킹
-    results = _rerank(query_text, results, limit)
-
-    return {
-        "소요시간": f"{time.time() - t0:.2f}초",
-        "검색개수": len(results),
-        "결과": results,
-    }
 
 
-@mcp.tool()
-def list_available_docs(domain: str = "") -> dict:
-    """
-    저장된 문서 목록을 조회합니다.
-
-    Args:
-        domain: 도메인 필터 (선택). "law"=법령만, "guide"=가이드/매뉴얼만, ""=전체
-
-    Returns:
-        문서 제목 목록과 도메인별 통계
-    """
+def _list_available_docs_sync(domain: str) -> dict:
+    """list_available_docs의 동기 구현."""
     client = _get_client()
 
     scroll_filter = None
     if domain:
         scroll_filter = models.Filter(
-            must=[models.FieldCondition(key="domain", match=models.MatchValue(value=domain))]
+            must=[
+                models.FieldCondition(
+                    key="domain", match=models.MatchValue(value=domain)
+                )
+            ]
         )
 
     all_records = []
@@ -237,7 +261,6 @@ def list_available_docs(domain: str = "") -> dict:
         if offset is None:
             break
 
-    # 도메인별 고유 제목 수집
     doc_map: Dict[str, set] = {}
     for rec in all_records:
         pl = rec.payload or {}
@@ -257,22 +280,21 @@ def list_available_docs(domain: str = "") -> dict:
 
 
 @mcp.tool()
-def get_doc_by_title(
-    title: str,
-    sub_title: str = "",
-    limit: int = 50,
-) -> dict:
+async def list_available_docs(domain: str = "") -> dict:
     """
-    특정 문서/법령의 조문 또는 섹션을 정확히 조회합니다 (벡터 검색 없이 필터만 사용).
+    저장된 문서 목록을 조회합니다.
 
     Args:
-        title: 문서/법령 제목 (필수). 예: "주택임대차보호법", "전세사기 피해예방 종합안내서"
-        sub_title: 조문/섹션명 필터 (선택). 예: "제3조", "전세의 의미"
-        limit: 최대 반환 건수 (기본 50)
+        domain: 도메인 필터 (선택). "law"=법령만, "guide"=가이드/매뉴얼만, ""=전체
 
     Returns:
-        해당 문서의 조문/섹션 목록
+        문서 제목 목록과 도메인별 통계
     """
+    return await asyncio.to_thread(_list_available_docs_sync, domain)
+
+
+def _get_doc_by_title_sync(title: str, sub_title: str, limit: int) -> dict:
+    """get_doc_by_title의 동기 구현."""
     client = _get_client()
 
     filter_conditions = [
@@ -280,7 +302,9 @@ def get_doc_by_title(
     ]
     if sub_title:
         filter_conditions.append(
-            models.FieldCondition(key="sub_title", match=models.MatchText(text=sub_title))
+            models.FieldCondition(
+                key="sub_title", match=models.MatchText(text=sub_title)
+            )
         )
 
     records, _ = client.scroll(
@@ -315,7 +339,29 @@ def get_doc_by_title(
     }
 
 
+@mcp.tool()
+async def get_doc_by_title(
+    title: str,
+    sub_title: str = "",
+    limit: int = 50,
+) -> dict:
+    """
+    특정 문서/법령의 조문 또는 섹션을 정확히 조회합니다 (벡터 검색 없이 필터만 사용).
+
+    Args:
+        title: 문서/법령 제목 (필수). 예: "주택임대차보호법", "전세사기 피해예방 종합안내서"
+        sub_title: 조문/섹션명 필터 (선택). 예: "제3조", "전세의 의미"
+        limit: 최대 반환 건수 (기본 50)
+
+    Returns:
+        해당 문서의 조문/섹션 목록
+    """
+    return await asyncio.to_thread(_get_doc_by_title_sync, title, sub_title, limit)
+
+
 if __name__ == "__main__":
     transport = os.environ.get("MCP_TRANSPORT", "streamable-http")
-    print(f"Starting hug-rag MCP server on :{os.environ.get('MCP_PORT', '1883')} ({transport})")
+    print(
+        f"Starting hug-rag MCP server on :{os.environ.get('MCP_PORT', '1883')} ({transport})"
+    )
     mcp.run(transport=transport)

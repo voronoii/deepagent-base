@@ -26,7 +26,7 @@ from langchain_core.tools import StructuredTool
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(__file__).parent /"config"/ "mcp_config.json"
+CONFIG_PATH = Path(__file__).parent / "config" / "mcp_config.json"
 
 
 class MCPToolManager:
@@ -78,9 +78,7 @@ class MCPToolManager:
                     e,
                 )
 
-        logger.info(
-            "MCP initialization complete: %d tool(s) loaded", len(self._tools)
-        )
+        logger.info("MCP initialization complete: %d tool(s) loaded", len(self._tools))
         self._initialized = True
 
     def get_tools(self) -> list[StructuredTool]:
@@ -202,9 +200,7 @@ class MCPToolManager:
         elif transport == "streamable_http":
             session = await self._connect_streamable_http(config)
         else:
-            logger.warning(
-                "Unknown transport '%s' for server '%s'", transport, name
-            )
+            logger.warning("Unknown transport '%s' for server '%s'", transport, name)
             return
 
         await session.initialize()
@@ -236,9 +232,7 @@ class MCPToolManager:
     async def _connect_sse(self, config: dict) -> ClientSession:
         """Establish an SSE transport connection (legacy)."""
         url = config["url"]
-        sse_transport = await self._exit_stack.enter_async_context(
-            sse_client(url)
-        )
+        sse_transport = await self._exit_stack.enter_async_context(sse_client(url))
         read_stream, write_stream = sse_transport
         session = await self._exit_stack.enter_async_context(
             ClientSession(read_stream, write_stream)
@@ -326,35 +320,84 @@ class MCPToolManager:
                 {k: v.annotation for k, v in args_schema.model_fields.items()},
             )
 
+        _TRANSIENT_ERRORS = (
+            ConnectionError,
+            TimeoutError,
+            OSError,
+            asyncio.TimeoutError,
+        )
+        _MAX_RETRIES = 1
+
         async def _call_tool(**kwargs: Any) -> str:
             agent_logger.mcp_call(server_name, tool_name, kwargs)
             t0 = time.monotonic()
-            try:
-                result = await session.call_tool(tool_name, arguments=kwargs)
-                elapsed = time.monotonic() - t0
-                # Check for MCP-level errors
-                if getattr(result, "isError", False):
-                    error_text = str(result.content) if hasattr(result, "content") else str(result)
-                    agent_logger.mcp_error(server_name, tool_name, error_text[:500])
-                    return f"Error calling {tool_name}: {error_text}"
-                # Extract text content from MCP result
-                if hasattr(result, "content") and result.content:
-                    texts = []
-                    for block in result.content:
-                        if hasattr(block, "text"):
-                            texts.append(block.text)
-                    response = "\n".join(texts) if texts else str(result)
-                    agent_logger.mcp_result(
-                        server_name, tool_name, len(response),
-                        response[:200], elapsed,
+            last_exc: Exception | None = None
+
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
+                    result = await session.call_tool(tool_name, arguments=kwargs)
+                    elapsed = time.monotonic() - t0
+
+                    if getattr(result, "isError", False):
+                        error_text = (
+                            str(result.content)
+                            if hasattr(result, "content")
+                            else str(result)
+                        )
+                        agent_logger.mcp_error(server_name, tool_name, error_text[:500])
+                        return (
+                            f"[TOOL_ERROR] {tool_name} | retry_possible=false | "
+                            f"{error_text}"
+                        )
+
+                    if hasattr(result, "content") and result.content:
+                        texts = []
+                        for block in result.content:
+                            if hasattr(block, "text"):
+                                texts.append(block.text)
+                        response = "\n".join(texts) if texts else str(result)
+                        agent_logger.mcp_result(
+                            server_name,
+                            tool_name,
+                            len(response),
+                            response[:200],
+                            elapsed,
+                        )
+                        return response
+                    return str(result)
+
+                except _TRANSIENT_ERRORS as e:
+                    last_exc = e
+                    if attempt < _MAX_RETRIES:
+                        wait = 1.0 * (attempt + 1)
+                        agent_logger.mcp_error(
+                            server_name,
+                            tool_name,
+                            f"{type(e).__name__}: {e} (retry {attempt + 1}/{_MAX_RETRIES} in {wait}s)",
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+
+                except Exception as e:
+                    agent_logger.mcp_error(
+                        server_name,
+                        tool_name,
+                        f"{type(e).__name__}: {e}",
                     )
-                    return response
-                return str(result)
-            except Exception as e:
-                agent_logger.mcp_error(
-                    server_name, tool_name, f"{type(e).__name__}: {e}",
-                )
-                return f"Error calling {tool_name}: {e}"
+                    return (
+                        f"[TOOL_ERROR] {tool_name} | retry_possible=false | "
+                        f"{type(e).__name__}: {e}"
+                    )
+
+            agent_logger.mcp_error(
+                server_name,
+                tool_name,
+                f"transient failure after {_MAX_RETRIES + 1} attempts: {last_exc}",
+            )
+            return (
+                f"[TOOL_ERROR] {tool_name} | retry_possible=true | "
+                f"일시적 연결 오류 ({_MAX_RETRIES + 1}회 시도 후 실패): {last_exc}"
+            )
 
         return StructuredTool.from_function(
             coroutine=_call_tool,

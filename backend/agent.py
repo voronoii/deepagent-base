@@ -5,7 +5,6 @@ from typing import Annotated, Literal
 from typing_extensions import TypedDict
 from langchain_core.messages import BaseMessage, AIMessage
 from langgraph.graph.message import add_messages
-from langchain_community.tools import DuckDuckGoSearchRun
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
@@ -30,15 +29,14 @@ logger = logging.getLogger(__name__)
 
 # --- Sub-Agent Definitions ---
 
-search_tool = DuckDuckGoSearchRun()
 
 # Use a lower max_tokens for sub-agents so their responses don't blow
 # the orchestrator's 32768-token context window on the next vLLM call.
 _subagent_model = get_model(max_tokens=2048)
 
 def _build_research_tools() -> list:
-    """Build the tool list for the research agent (DuckDuckGo + any MCP tools)."""
-    tools = [search_tool]
+    """Build the tool list for the research agent (any MCP tools)."""
+    tools = []
     mcp_tools = mcp_manager.get_tools()
     if mcp_tools:
         logger.info("Adding %d MCP tool(s) to research agent", len(mcp_tools))
@@ -54,7 +52,7 @@ research_agent_spec = {
         "look up facts, or research a topic. Give it one focused topic at a time."
     ),
     "system_prompt": RESEARCH_AGENT_PROMPT,
-    "tools": _build_research_tools(),  # DuckDuckGo + MCP tools (if loaded)
+    "tools": _build_research_tools(),  # MCP tools (if loaded)
     "model": _subagent_model,
     "middleware": [TracingMiddleware("research-agent")],
 }
@@ -78,18 +76,18 @@ risk_assessment_agent_spec = {
     "middleware": [TracingMiddleware("risk-assessment-agent")],
 }
 
-report_writer_spec = {
-    "name": "report-writer-agent",
-    "description": (
-        "Report writer agent for creating structured, professional reports. "
-        "Delegate to this agent when you need to write a report, summary, or "
-        "structured document from gathered information. Provide all the research "
-        "data and context it needs to write the report."
-    ),
-    "system_prompt": REPORT_WRITER_PROMPT,
-    "model": _subagent_model,
-    "middleware": [TracingMiddleware("report-writer-agent")],
-}
+# report_writer_spec = {
+#     "name": "report-writer-agent",
+#     "description": (
+#         "Report writer agent for creating structured, professional reports. "
+#         "Delegate to this agent when you need to write a report, summary, or "
+#         "structured document from gathered information. Provide all the research "
+#         "data and context it needs to write the report."
+#     ),
+#     "system_prompt": REPORT_WRITER_PROMPT,
+#     "model": _subagent_model,
+#     "middleware": [TracingMiddleware("report-writer-agent")],
+# }
 
 
 # --- Checkpointer for conversation memory ---
@@ -255,26 +253,12 @@ def create_orchestrator():
     system_prompt = ORCHESTRATOR_PROMPT + mcp_desc
     
 
-    # mcp_tools = mcp_manager.get_tools()
-    # if mcp_tools:
-    #     tool_lines = []
-    #     for tool in mcp_tools:
-    #         name = tool.name
-    #         desc = (tool.description or "").strip().split("\n")[0]
-    #         tool_lines.append(f"- **{name}**: {desc}")
-    #     mcp_tool_section = (
-    #         "\n## Available MCP Tools\n"
-    #         + "아래 MCP 도구를 우선적으로 사용하세요. DuckDuckGo보다 더 정확한 결과를 제공합니다.\n\n"
-    #         + "\n".join(tool_lines)
-    #         + "\n"
-    #     )
-    #     research_agent_spec["system_prompt"] = RESEARCH_AGENT_PROMPT + mcp_tool_section
-
+    
         
     if mcp_desc:
         logger.info("Injected MCP tool descriptions into orchestrator prompt")
 
-    subagent_names = [s["name"] for s in [research_agent_spec, report_writer_spec, risk_assessment_agent_spec]]
+    subagent_names = [s["name"] for s in [research_agent_spec, risk_assessment_agent_spec]]
     agent_logger.lifecycle(
         "orchestrator", "AGENTS",
         f"Sub-agents: {subagent_names}",
@@ -284,7 +268,7 @@ def create_orchestrator():
     inner_agent = create_deep_agent(
         model=model,
         system_prompt=system_prompt,
-        subagents=[research_agent_spec, report_writer_spec, risk_assessment_agent_spec],
+        subagents=[research_agent_spec, risk_assessment_agent_spec],
         memory=[AGENTS_MD_PATH],
         backend=FilesystemBackend(root_dir=AGENT_ROOT_DIR),
         name="orchestrator",

@@ -132,9 +132,7 @@ def _extract_tool_display(
 
         return display_name, f"{action_verb}를 진행합니다"
 
-    elif name == "duckduckgo_search":
-        query = args.get("query", args.get("input", ""))
-        return "웹 검색", f'"{query}" 검색 중'
+    
     elif name == "write_todos":
         return "작업 계획", "작업 목록을 정리하고 있습니다"
     elif name in ("read_file", "write_file", "edit_file"):
@@ -166,30 +164,51 @@ def _extract_text_content(message: AIMessage) -> str:
 
 
 def _try_extract_data_cards(text: str) -> list[dict]:
-    """Attempt to extract data cards from structured text.
+    """Extract data cards only from <!-- data-cards --> marked sections.
 
-    Looks for patterns like "- Label: Value" or "**Label**: Value".
+    Only parses "- Label: Value" lines inside explicit marker blocks.
+    Bullet lists outside markers are left as normal markdown.
     """
+    import re
+
     cards = []
-    for line in text.split("\n"):
-        line = line.strip()
-        if line.startswith("- ") or line.startswith("* "):
-            line = line[2:]
-        else:
-            continue
+    # Find all <!-- data-cards --> ... <!-- /data-cards --> blocks
+    pattern = r"<!--\s*data-cards\s*-->(.*?)<!--\s*/data-cards\s*-->"
+    blocks = re.findall(pattern, text, re.DOTALL)
 
-        # Remove bold markers
-        line = line.replace("**", "")
+    for block in blocks:
+        for line in block.split("\n"):
+            line = line.strip()
+            if line.startswith("- ") or line.startswith("* "):
+                line = line[2:]
+            else:
+                continue
 
-        if ": " in line:
-            label, value = line.split(": ", 1)
-            label = label.strip()
-            value = value.strip()
-            # Only short label + value pairs that look like data cards
-            if 1 < len(label) < 50 and 0 < len(value) < 200:
-                cards.append({"label": label, "value": value})
+            line = line.replace("**", "")
+
+            if ": " in line:
+                label, value = line.split(": ", 1)
+                label = label.strip()
+                value = value.strip()
+                if 1 < len(label) < 50 and 0 < len(value) < 200:
+                    cards.append({"label": label, "value": value})
 
     return cards[:10]
+
+
+def _strip_data_card_markers(text: str) -> str:
+    """Remove <!-- data-cards --> blocks from display text.
+
+    The data is already extracted into dataCards, so the raw markers
+    should not appear in the rendered markdown.
+    """
+    import re
+    return re.sub(
+        r"<!--\s*data-cards\s*-->.*?<!--\s*/data-cards\s*-->",
+        "",
+        text,
+        flags=re.DOTALL,
+    ).strip()
 
 
 def _extract_title(text: str) -> str:
@@ -467,6 +486,9 @@ async def _stream_agent_response(message: str, thread_id: str):
             data_cards = _try_extract_data_cards(final_text)
             title = _extract_title(final_text)
 
+            # Remove data-cards marker blocks from displayed content
+            display_text = _strip_data_card_markers(final_text)
+
             source = "orchestrator"
             if final_text is fallback_text:
                 source = "orchestrator (partial)"
@@ -476,7 +498,7 @@ async def _stream_agent_response(message: str, thread_id: str):
             )
             yield _sse_event("message", {
                 "role": "assistant",
-                "content": final_text,
+                "content": display_text,
                 "title": title,
                 "dataCards": data_cards,
                 "source": source,
@@ -501,7 +523,7 @@ async def _stream_agent_response(message: str, thread_id: str):
             )
             yield _sse_event("message", {
                 "role": "assistant",
-                "content": fallback_text,
+                "content": _strip_data_card_markers(fallback_text),
                 "title": _extract_title(fallback_text),
                 "dataCards": _try_extract_data_cards(fallback_text),
                 "source": "orchestrator (partial)",
