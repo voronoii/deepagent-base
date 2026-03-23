@@ -24,10 +24,6 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-os.environ["LANGSMITH_TRACING"] = "true"
-os.environ["LANGSMITH_API_KEY"] = "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"
-os.environ["LANGSMITH_PROJECT"] = "deepagents-debug2"
-
 logger = logging.getLogger(__name__)
 todo_logger = logging.getLogger("middleware.todo")
 todo_logger.setLevel(logging.DEBUG)
