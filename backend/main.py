@@ -19,8 +19,23 @@ from backend.agent import create_orchestrator
 from backend.mcp_tools import mcp_manager
 from backend.config import MAX_CONTEXT_TOKENS
 from backend import agent_logger
+import langsmith as ls
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+os.environ["LANGSMITH_TRACING"] = "true"
+os.environ["LANGSMITH_API_KEY"] = "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"
+os.environ["LANGSMITH_PROJECT"] = "deepagents-debug2"
 
 logger = logging.getLogger(__name__)
+todo_logger = logging.getLogger("middleware.todo")
+todo_logger.setLevel(logging.DEBUG)
+# Ensure todo_logger always has a handler (basicConfig may not have run yet)
+if not todo_logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    todo_logger.addHandler(_h)
 
 # --- FastAPI App ---
 
@@ -69,6 +84,7 @@ async def startup_event():
     logger.info("Initializing orchestrator agent...")
     _orchestrator = create_orchestrator()
     logger.info("Orchestrator agent ready.")
+    todo_logger.info("✅ todo_logger initialized and working")
 
 
 @app.on_event("shutdown")
@@ -79,8 +95,31 @@ async def shutdown_event():
 
 # --- Helper functions ---
 
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _log_todo_update(todos: list[dict], source: str = "unknown") -> None:
+    """Log todo list changes from write_todos tool calls."""
+    if not todos:
+        return
+    status_emoji = {"pending": "⏳", "in_progress": "🔄", "completed": "✅"}
+    todo_logger.info("━━━ TODO UPDATE [%s] ━━━", source)
+    for i, t in enumerate(todos, 1):
+        status = t.get("status", "unknown")
+        emoji = status_emoji.get(status, "❓")
+        content = t.get("content", "")
+        todo_logger.info("  %s %d. [%s] %s", emoji, i, status, content)
+
+    # Summary counts
+    counts = {}
+    for t in todos:
+        s = t.get("status", "unknown")
+        counts[s] = counts.get(s, 0) + 1
+    summary = ", ".join(f"{k}={v}" for k, v in counts.items())
+    todo_logger.info("  📊 Summary: %s (total=%d)", summary, len(todos))
+    todo_logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 
 def _sse_event(event: str, data) -> dict:
@@ -98,9 +137,7 @@ _AGENT_DISPLAY: dict[str, tuple[str, str]] = {
 }
 
 
-def _extract_tool_display(
-    tool_call: dict, reasoning_text: str = ""
-) -> tuple[str, str]:
+def _extract_tool_display(tool_call: dict, reasoning_text: str = "") -> tuple[str, str]:
     """Extract a human-readable name and description from a tool call.
 
     Args:
@@ -132,7 +169,6 @@ def _extract_tool_display(
 
         return display_name, f"{action_verb}를 진행합니다"
 
-    
     elif name == "write_todos":
         return "작업 계획", "작업 목록을 정리하고 있습니다"
     elif name in ("read_file", "write_file", "edit_file"):
@@ -161,6 +197,40 @@ def _extract_text_content(message: AIMessage) -> str:
                 text_parts.append(part)
         return "\n".join(text_parts)
     return str(content)
+
+
+def _extract_sources_from_tool_result(content_str: str, tool_name: str) -> list[dict]:
+    """Extract source citations from hug-rag MCP tool results."""
+    if "hug-rag" not in (tool_name or ""):
+        return []
+    try:
+        data = json.loads(content_str)
+        sources = []
+        for item in data.get("결과", []):
+            source = {
+                "title": item.get("문서제목", ""),
+                "section": item.get("조문/섹션명", ""),
+                "domain": item.get("도메인", ""),
+                "similarity": item.get("유사도", ""),
+                "preview": item.get("조문/섹션내용", ""),
+            }
+            if source["title"] and source["title"] != "N/A":
+                sources.append(source)
+        return sources
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _deduplicate_sources(sources: list[dict]) -> list[dict]:
+    """Remove duplicate sources by (title, section) pair."""
+    seen = set()
+    unique = []
+    for s in sources:
+        key = (s["title"], s["section"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(s)
+    return unique
 
 
 def _try_extract_data_cards(text: str) -> list[dict]:
@@ -203,6 +273,7 @@ def _strip_data_card_markers(text: str) -> str:
     should not appear in the rendered markdown.
     """
     import re
+
     return re.sub(
         r"<!--\s*data-cards\s*-->.*?<!--\s*/data-cards\s*-->",
         "",
@@ -269,6 +340,7 @@ def _extract_token_usage(msg: AIMessage, source: str = "unknown") -> dict | None
 
 # --- SSE Streaming Endpoint ---
 
+
 async def _stream_agent_response(message: str, thread_id: str):
     """Stream agent response as SSE events.
 
@@ -287,279 +359,332 @@ async def _stream_agent_response(message: str, thread_id: str):
     """
     start_time = time.monotonic()
     agent_logger.lifecycle(
-        "orchestrator", "START",
+        "orchestrator",
+        "START",
         f"thread={thread_id}, message_length={len(message)}",
     )
+    with ls.tracing_context(enabled=True):
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            input_msg = {"messages": [{"role": "user", "content": message}]}
 
-    try:
-        config = {"configurable": {"thread_id": thread_id}}
-        input_msg = {"messages": [{"role": "user", "content": message}]}
+            # Track pending tool calls: tool_call_id -> {display_name, is_subagent, agent_type}
+            pending_tools: dict[str, dict] = {}
+            final_text = ""
+            fallback_text = ""
+            collected_sources: list[dict] = []
+            # Track token usage across the conversation for logging
+            _prev_prompt_tokens = 0
+            _max_prompt_tokens = 0
+            # Token streaming state
+            _streamed_any = False
 
-        # Track pending tool calls: tool_call_id -> {display_name, is_subagent, agent_type}
-        pending_tools: dict[str, dict] = {}
-        final_text = ""
-        fallback_text = ""
-        # Track token usage across the conversation for logging
-        _prev_prompt_tokens = 0
-        _max_prompt_tokens = 0
-        # Token streaming state
-        _streamed_any = False
+            
+            async for chunk in _orchestrator.astream(
+                input_msg,
+                config=config,
+                stream_mode=["messages", "updates"],
+                subgraphs=True,
+                version="v2",
+            ):
+                mode = chunk["type"]
+                ns = chunk.get("ns", ())
+                data = chunk["data"]
 
-        async for event in _orchestrator.astream(
-            input_msg,
-            config=config,
-            stream_mode=["messages", "updates"],
-        ):
-            mode = event[0]
-            chunk = event[1]
+                # ── messages mode: real-time token streaming ──────────
+                if mode == "messages":
+                    msg, _metadata = data
 
-            # ── messages mode: real-time token streaming ──────────
-            if mode == "messages":
-                msg, _metadata = chunk
+                    if isinstance(msg, AIMessageChunk):
+                        tool_chunks = getattr(msg, "tool_call_chunks", None) or []
+                        has_tool_chunks = bool(tool_chunks) and any(
+                            tc.get("name") or tc.get("args") for tc in tool_chunks
+                        )
 
-                if isinstance(msg, AIMessageChunk):
-                    # Check for tool call chunks
-                    tool_chunks = getattr(msg, "tool_call_chunks", None) or []
-                    has_tool_chunks = bool(tool_chunks) and any(
-                        tc.get("name") or tc.get("args") for tc in tool_chunks
-                    )
+                        if has_tool_chunks:
+                            if _streamed_any:
+                                yield _sse_event("token_clear", {})
+                                _streamed_any = False
+                        else:
+                            text = ""
+                            content = msg.content
+                            if isinstance(content, str):
+                                text = content
+                            elif isinstance(content, list):
+                                for part in content:
+                                    if (
+                                        isinstance(part, dict)
+                                        and part.get("type") == "text"
+                                    ):
+                                        text += part.get("text", "")
+                                    elif isinstance(part, str):
+                                        text += part
 
-                    if has_tool_chunks:
-                        # Tool call detected — clear any streamed tokens
-                        if _streamed_any:
-                            yield _sse_event("token_clear", {})
-                            _streamed_any = False
-                    else:
-                        # Extract text content from chunk
-                        text = ""
-                        content = msg.content
-                        if isinstance(content, str):
-                            text = content
-                        elif isinstance(content, list):
-                            for part in content:
-                                if isinstance(part, dict) and part.get("type") == "text":
-                                    text += part.get("text", "")
-                                elif isinstance(part, str):
-                                    text += part
+                            if text:
+                                yield _sse_event("token", {"content": text})
+                                _streamed_any = True
 
-                        if text:
-                            yield _sse_event("token", {"content": text})
-                            _streamed_any = True
-
-                continue  # Skip updates processing for messages chunks
-
-            # ── updates mode: structured node events ──────────────
-            if not isinstance(chunk, dict):
-                continue
-
-            for node_name, update in chunk.items():
-                if not isinstance(update, dict):
                     continue
 
-                messages = update.get("messages", [])
-                if not isinstance(messages, list):
-                    messages = [messages]
+                # ── updates mode: structured node events ──────────────
+                if not isinstance(data, dict):
+                    continue
 
-                for msg in messages:
-                    # --- AIMessage with tool_calls: emit reasoning steps ---
-                    if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-                        reasoning_text = _extract_text_content(msg).strip()
+                for node_name, update in data.items():
+                    if not isinstance(update, dict):
+                        continue
 
-                        for tc in msg.tool_calls:
-                            tc_id = tc.get("id", "")
-                            display_name, description = _extract_tool_display(
-                                tc, reasoning_text
+                    source_label = node_name
+                    if ns:
+                        source_label = f"{'.'.join(str(s) for s in ns)}.{node_name}"
+
+                    # Capture todo state updates from write_todos Command
+                    updated_todos = update.get("todos")
+                    if updated_todos is not None:
+                        todo_logger.info("📋 STATE.TODOS updated via [%s]:", source_label)
+                        for i, t in enumerate(updated_todos, 1):
+                            status = t.get("status", t.get("status", "unknown"))
+                            content = t.get("content", "")
+                            todo_logger.info("  %d. [%s] %s", i, status, content)
+                        yield _sse_event(
+                            "todo_update",
+                            {
+                                "todos": updated_todos,
+                                "source": source_label,
+                                "timestamp": _now_iso(),
+                            },
+                        )
+
+                    messages = update.get("messages", [])
+                    if not isinstance(messages, list):
+                        messages = [messages]
+
+                    for msg in messages:
+                        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                            reasoning_text = _extract_text_content(msg).strip()
+
+                            for tc in msg.tool_calls:
+                                tc_id = tc.get("id", "")
+                                display_name, description = _extract_tool_display(
+                                    tc, reasoning_text
+                                )
+                                tc_name = tc.get("name", "unknown")
+                                tc_args = tc.get("args", {})
+                                is_subagent = tc_name == "task"
+                                subagent_type = (
+                                    tc_args.get("subagent_type", "") if is_subagent else ""
+                                )
+                                pending_tools[tc_id] = {
+                                    "display_name": display_name,
+                                    "is_subagent": is_subagent,
+                                    "agent_type": subagent_type,
+                                }
+                                if is_subagent:
+                                    task_desc = tc_args.get("description", "")
+                                    agent_logger.handoff(
+                                        source_label, subagent_type, task_desc
+                                    )
+                                else:
+                                    agent_logger.tool_call(source_label, tc_name, tc_args)
+
+                                # Log ALL tool calls for debugging
+                                todo_logger.debug("🔧 Tool call detected: %s (source=%s)", tc_name, source_label)
+
+                                # Log write_todos tool call details
+                                if tc_name == "write_todos":
+                                    todo_items = tc_args.get("todos", [])
+                                    _log_todo_update(todo_items, source=source_label)
+                                    todo_logger.info("🎯 write_todos CALLED with %d items", len(todo_items))
+
+                                yield _sse_event(
+                                    "reasoning_step",
+                                    {
+                                        "name": display_name,
+                                        "status": "in_progress",
+                                        "description": description,
+                                        "timestamp": _now_iso(),
+                                    },
+                                )
+
+                            if reasoning_text:
+                                fallback_text = reasoning_text
+
+                            token_usage = _extract_token_usage(msg, source=source_label)
+                            if token_usage:
+                                pt = token_usage["promptTokens"]
+                                if pt != _prev_prompt_tokens:
+                                    delta = pt - _prev_prompt_tokens
+                                    logger.info(
+                                        "Context change [%s]: %d → %d (%+d tokens)",
+                                        source_label,
+                                        _prev_prompt_tokens,
+                                        pt,
+                                        delta,
+                                    )
+                                    _prev_prompt_tokens = pt
+                                _max_prompt_tokens = max(_max_prompt_tokens, pt)
+                                yield _sse_event("metadata", token_usage)
+
+                        elif isinstance(msg, ToolMessage):
+                            tc_id = getattr(msg, "tool_call_id", "")
+                            tool_name = getattr(msg, "name", "")
+                            tool_info = pending_tools.pop(
+                                tc_id,
+                                {
+                                    "display_name": tool_name or "Tool",
+                                    "is_subagent": False,
+                                    "agent_type": "",
+                                },
                             )
-                            tc_name = tc.get("name", "unknown")
-                            tc_args = tc.get("args", {})
-                            is_subagent = tc_name == "task"
-                            subagent_type = tc_args.get("subagent_type", "") if is_subagent else ""
-                            pending_tools[tc_id] = {
-                                "display_name": display_name,
-                                "is_subagent": is_subagent,
-                                "agent_type": subagent_type,
-                            }
-                            if is_subagent:
-                                task_desc = tc_args.get("description", "")
-                                agent_logger.handoff(
-                                    node_name, subagent_type, task_desc
+                            display_name = tool_info["display_name"]
+
+                            content_str = str(msg.content) if msg.content else ""
+                            # Extract sources from hug-rag tool results
+                            collected_sources.extend(
+                                _extract_sources_from_tool_result(content_str, tool_name)
+                            )
+                            preview = content_str[:200]
+
+                            if tool_info["is_subagent"]:
+                                agent_logger.response(
+                                    tool_info["agent_type"] or display_name,
+                                    content_str,
+                                    len(content_str),
                                 )
                             else:
-                                agent_logger.tool_call(
-                                    node_name, tc_name, tc_args
+                                agent_logger.tool_result(
+                                    source_label, display_name, len(content_str)
                                 )
-
-                            logger.debug(
-                                "Emitting reasoning_step: name=%s, status=in_progress",
-                                display_name,
-                            )
-                            yield _sse_event("reasoning_step", {
-                                "name": display_name,
-                                "status": "in_progress",
-                                "description": description,
-                                "timestamp": _now_iso(),
-                            })
-
-                        if reasoning_text:
-                            fallback_text = reasoning_text
-
-                        # Emit token usage metadata if available
-                        token_usage = _extract_token_usage(msg, source=node_name)
-                        if token_usage:
-                            pt = token_usage["promptTokens"]
-                            if pt != _prev_prompt_tokens:
-                                delta = pt - _prev_prompt_tokens
-                                logger.info(
-                                    "Context change [%s]: %d → %d (%+d tokens)",
-                                    node_name, _prev_prompt_tokens, pt, delta,
-                                )
-                                _prev_prompt_tokens = pt
-                            _max_prompt_tokens = max(_max_prompt_tokens, pt)
-                            yield _sse_event("metadata", token_usage)
-
-                    # --- ToolMessage: mark tool as completed ---
-                    elif isinstance(msg, ToolMessage):
-                        tc_id = getattr(msg, "tool_call_id", "")
-                        tool_name = getattr(msg, "name", "")
-                        tool_info = pending_tools.pop(
-                            tc_id,
-                            {"display_name": tool_name or "Tool", "is_subagent": False, "agent_type": ""},
-                        )
-                        display_name = tool_info["display_name"]
-
-                        content_str = str(msg.content) if msg.content else ""
-                        preview = content_str[:200]
-
-                        if tool_info["is_subagent"]:
-                            agent_logger.response(
-                                tool_info["agent_type"] or display_name,
-                                content_str,
-                                len(content_str),
-                            )
-                        else:
-                            agent_logger.tool_result(
-                                node_name, display_name, len(content_str)
-                            )
-                        yield _sse_event("reasoning_step", {
-                            "name": display_name,
-                            "status": "completed",
-                            "description": preview,
-                            "timestamp": _now_iso(),
-                        })
-
-                    # --- AIMessage without tool_calls: final response ---
-                    elif isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None):
-                        text = _extract_text_content(msg)
-                        if text.strip():
-                            final_text = text
-                            logger.debug(
-                                "Captured final AIMessage text (length=%d)",
-                                len(text),
+                            yield _sse_event(
+                                "reasoning_step",
+                                {
+                                    "name": display_name,
+                                    "status": "completed",
+                                    "description": preview,
+                                    "timestamp": _now_iso(),
+                                },
                             )
 
-                        # Emit token usage metadata if available
-                        token_usage = _extract_token_usage(msg, source=node_name)
-                        if token_usage:
-                            pt = token_usage["promptTokens"]
-                            if pt != _prev_prompt_tokens:
-                                delta = pt - _prev_prompt_tokens
-                                logger.info(
-                                    "Context change [%s]: %d → %d (%+d tokens)",
-                                    node_name, _prev_prompt_tokens, pt, delta,
-                                )
-                                _prev_prompt_tokens = pt
-                            _max_prompt_tokens = max(_max_prompt_tokens, pt)
-                            yield _sse_event("metadata", token_usage)
+                        elif isinstance(msg, AIMessage) and not getattr(
+                            msg, "tool_calls", None
+                        ):
+                            text = _extract_text_content(msg)
+                            if text.strip():
+                                final_text = text
 
-        # Emit final message
-        elapsed = time.monotonic() - start_time
+                            token_usage = _extract_token_usage(msg, source=source_label)
+                            if token_usage:
+                                pt = token_usage["promptTokens"]
+                                if pt != _prev_prompt_tokens:
+                                    delta = pt - _prev_prompt_tokens
+                                    logger.info(
+                                        "Context change [%s]: %d → %d (%+d tokens)",
+                                        source_label,
+                                        _prev_prompt_tokens,
+                                        pt,
+                                        delta,
+                                    )
+                                    _prev_prompt_tokens = pt
+                                _max_prompt_tokens = max(_max_prompt_tokens, pt)
+                                yield _sse_event("metadata", token_usage)
 
-        # If no clean final text, fall back to intermediate orchestrator text
-        if not final_text.strip() and fallback_text.strip():
-            logger.info(
-                "No final AIMessage text; using fallback_text (length=%d)",
-                len(fallback_text),
-            )
-            final_text = fallback_text
+            # Emit final message
+            elapsed = time.monotonic() - start_time
 
-        if final_text.strip():
-            data_cards = _try_extract_data_cards(final_text)
-            title = _extract_title(final_text)
-
-            # Remove data-cards marker blocks from displayed content
-            display_text = _strip_data_card_markers(final_text)
-
-            source = "orchestrator"
-            if final_text is fallback_text:
-                source = "orchestrator (partial)"
-
-            agent_logger.response(
-                "orchestrator", final_text, len(final_text)
-            )
-            yield _sse_event("message", {
-                "role": "assistant",
-                "content": display_text,
-                "title": title,
-                "dataCards": data_cards,
-                "source": source,
-                "processingTime": f"{elapsed:.1f}s",
-            })
-        else:
-            logger.warning(
-                "Stream completed with no final text after %.1fs", elapsed
-            )
-
-    except Exception as e:
-        elapsed = time.monotonic() - start_time
-        agent_logger.error("orchestrator", f"Streaming error after {elapsed:.1f}s: {e}")
-        logger.debug("Traceback: %s", traceback.format_exc())
-
-        # If we captured intermediate content, emit it before the error
-        # so the user sees partial results.
-        if fallback_text.strip() and not final_text.strip():
-            logger.info(
-                "Emitting fallback message before error (length=%d)",
-                len(fallback_text),
-            )
-            yield _sse_event("message", {
-                "role": "assistant",
-                "content": _strip_data_card_markers(fallback_text),
-                "title": _extract_title(fallback_text),
-                "dataCards": _try_extract_data_cards(fallback_text),
-                "source": "orchestrator (partial)",
-                "processingTime": f"{elapsed:.1f}s",
-            })
-
-        logger.info("Emitting error event — type=%s", type(e).__name__)
-        yield _sse_event("error", {
-            "error": str(e),
-            "type": type(e).__name__,
-        })
-
-    finally:
-        elapsed = time.monotonic() - start_time
-        agent_logger.lifecycle(
-            "orchestrator", "DONE",
-            f"thread={thread_id}, elapsed={elapsed:.1f}s",
-        )
-        if _max_prompt_tokens > 0:
-            usage_pct = _max_prompt_tokens / MAX_CONTEXT_TOKENS * 100
-            logger.info(
-                "Context summary — peak_prompt_tokens=%d (%.0f%% of %d), "
-                "final_prompt_tokens=%d",
-                _max_prompt_tokens,
-                usage_pct,
-                MAX_CONTEXT_TOKENS,
-                _prev_prompt_tokens,
-            )
-            if usage_pct > 80:
-                logger.warning(
-                    "Context usage HIGH (%.0f%%) — consider conversation "
-                    "history trimming for thread=%s",
-                    usage_pct,
-                    thread_id,
+            # If no clean final text, fall back to intermediate orchestrator text
+            if not final_text.strip() and fallback_text.strip():
+                logger.info(
+                    "No final AIMessage text; using fallback_text (length=%d)",
+                    len(fallback_text),
                 )
-        yield _sse_event("done", json.dumps({"status": "completed"}))
+                final_text = fallback_text
+
+            if final_text.strip():
+                data_cards = _try_extract_data_cards(final_text)
+                title = _extract_title(final_text)
+
+                # Remove data-cards marker blocks from displayed content
+                display_text = _strip_data_card_markers(final_text)
+
+                source = "orchestrator"
+                if final_text is fallback_text:
+                    source = "orchestrator (partial)"
+
+                agent_logger.response("orchestrator", final_text, len(final_text))
+                yield _sse_event(
+                    "message",
+                    {
+                        "role": "assistant",
+                        "content": display_text,
+                        "title": title,
+                        "dataCards": data_cards,
+                        "sources": _deduplicate_sources(collected_sources),
+                        "source": source,
+                        "processingTime": f"{elapsed:.1f}s",
+                    },
+                )
+            else:
+                logger.warning("Stream completed with no final text after %.1fs", elapsed)
+
+        except Exception as e:
+            elapsed = time.monotonic() - start_time
+            agent_logger.error("orchestrator", f"Streaming error after {elapsed:.1f}s: {e}")
+            logger.debug("Traceback: %s", traceback.format_exc())
+
+            # If we captured intermediate content, emit it before the error
+            # so the user sees partial results.
+            if fallback_text.strip() and not final_text.strip():
+                logger.info(
+                    "Emitting fallback message before error (length=%d)",
+                    len(fallback_text),
+                )
+                yield _sse_event(
+                    "message",
+                    {
+                        "role": "assistant",
+                        "content": _strip_data_card_markers(fallback_text),
+                        "title": _extract_title(fallback_text),
+                        "dataCards": _try_extract_data_cards(fallback_text),
+                        "sources": _deduplicate_sources(collected_sources),
+                        "source": "orchestrator (partial)",
+                        "processingTime": f"{elapsed:.1f}s",
+                    },
+                )
+
+            logger.info("Emitting error event — type=%s", type(e).__name__)
+            yield _sse_event(
+                "error",
+                {
+                    "error": str(e),
+                    "type": type(e).__name__,
+                },
+            )
+
+        finally:
+            elapsed = time.monotonic() - start_time
+            agent_logger.lifecycle(
+                "orchestrator",
+                "DONE",
+                f"thread={thread_id}, elapsed={elapsed:.1f}s",
+            )
+            if _max_prompt_tokens > 0:
+                usage_pct = _max_prompt_tokens / MAX_CONTEXT_TOKENS * 100
+                logger.info(
+                    "Context summary — peak_prompt_tokens=%d (%.0f%% of %d), "
+                    "final_prompt_tokens=%d",
+                    _max_prompt_tokens,
+                    usage_pct,
+                    MAX_CONTEXT_TOKENS,
+                    _prev_prompt_tokens,
+                )
+                if usage_pct > 80:
+                    logger.warning(
+                        "Context usage HIGH (%.0f%%) — consider conversation "
+                        "history trimming for thread=%s",
+                        usage_pct,
+                        thread_id,
+                    )
+            yield _sse_event("done", json.dumps({"status": "completed"}))
 
 
 @app.post("/api/chat")
@@ -590,6 +715,7 @@ async def health():
 
 # --- MCP Health Check ---
 
+
 @app.get("/api/mcp/health")
 async def mcp_health():
     """Check health of all configured MCP servers."""
@@ -597,7 +723,11 @@ async def mcp_health():
     online = sum(1 for s in servers if s["status"] == "online")
     total_enabled = sum(1 for s in servers if s["enabled"])
     return {
-        "summary": {"online": online, "total_enabled": total_enabled, "total": len(servers)},
+        "summary": {
+            "online": online,
+            "total_enabled": total_enabled,
+            "total": len(servers),
+        },
         "servers": servers,
         "timestamp": _now_iso(),
     }

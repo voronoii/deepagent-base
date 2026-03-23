@@ -12,10 +12,19 @@ export interface DataCard {
   value: string;
 }
 
+export interface Source {
+  title: string;
+  section: string;
+  domain: string;
+  similarity: string;
+  preview: string;
+}
+
 export interface AssistantMessageData {
   content: string;
   title?: string;
   dataCards?: DataCard[];
+  sources?: Source[];
   source?: string;
   processingTime?: string;
 }

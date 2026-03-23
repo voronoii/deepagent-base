@@ -139,6 +139,7 @@ def _search_hug_docs_sync(
     domain: str,
     title_filter: str,
     limit: int,
+    use_reranker: bool = True,
 ) -> dict:
     """search_hug_docs의 동기 구현."""
     t0 = time.time()
@@ -183,8 +184,14 @@ def _search_hug_docs_sync(
         formatted["text_for_rerank"] = (sp.payload or {}).get("text", "")
         results.append(formatted)
 
-    with _rerank_gpu_lock:
-        results = _rerank(query_text, results, limit)
+    if use_reranker:
+        with _rerank_gpu_lock:
+            results = _rerank(query_text, results, limit)
+    else:
+        # Skip reranker — just trim to limit
+        for doc in results:
+            doc.pop("text_for_rerank", None)
+        results = results[:limit]
 
     return {
         "소요시간": f"{time.time() - t0:.2f}초",
@@ -199,11 +206,12 @@ async def search_hug_docs(
     domain: str = "",
     title_filter: str = "",
     limit: int = 5,
+    use_reranker: bool = True,
 ) -> dict:
     """
     전세 관련 법령 및 HUG 가이드 문서를 검색합니다.
 
-    벡터 유사도 검색 + 리랭킹으로 가장 관련성 높은 문서를 반환합니다.
+    벡터 유사도 검색 + 리랭킹(선택)으로 가장 관련성 높은 문서를 반환합니다.
 
     Args:
         query_text: 검색 질의 (필수). 예: "전세보증금 반환 조건", "임대차 계약 해지 절차"
@@ -212,16 +220,19 @@ async def search_hug_docs(
                 예: domain="guide" → HUG 가이드/매뉴얼에서만 검색
         title_filter: 특정 문서/법령명 필터 (선택). 예: "주택임대차보호법", "전세사기 피해예방"
         limit: 반환할 검색 결과 수 (기본값: 5)
+        use_reranker: 리랭커 사용 여부 (기본값: True). 정확한 법령 조항 조회 등
+                      쿼리가 구체적인 경우 False로 설정하면 응답 속도가 향상됩니다.
 
     Returns:
         검색 결과 딕셔너리 (유사도, 문서제목, 조문/섹션명, 내용 등 포함)
     """
     logger.info(
-        "search_hug_docs called: query_text=%r, domain=%r, title_filter=%r, limit=%d",
+        "search_hug_docs called: query_text=%r, domain=%r, title_filter=%r, limit=%d, use_reranker=%s",
         query_text,
         domain,
         title_filter,
         limit,
+        use_reranker,
     )
     return await asyncio.to_thread(
         _search_hug_docs_sync,
@@ -229,6 +240,7 @@ async def search_hug_docs(
         domain,
         title_filter,
         limit,
+        use_reranker,
     )
 
 

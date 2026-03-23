@@ -1,14 +1,56 @@
 'use client';
 
+import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AssistantMessageData, ReasoningStep } from '@/types';
+import { AssistantMessageData, ReasoningStep, Source } from '@/types';
 import DataCardGrid from './DataCardGrid';
 import CollapsibleSteps from './CollapsibleSteps';
 
 interface AssistantMessageProps {
   data: AssistantMessageData;
   reasoningSteps?: ReasoningStep[];
+}
+
+function SourceItem({ source }: { source: Source }) {
+  const [expanded, setExpanded] = useState(false);
+  const domainLabel = source.domain === 'law' ? '법령' : '가이드';
+  const domainColor = source.domain === 'law'
+    ? 'bg-blue-50 text-blue-600 border-blue-200'
+    : 'bg-emerald-50 text-emerald-600 border-emerald-200';
+
+  return (
+    <li className="text-sm">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full text-left flex items-start gap-2 py-1.5 px-2 rounded-lg hover:bg-slate-50 transition-colors"
+      >
+        <span className="material-symbols-outlined text-slate-400 text-base mt-0.5 shrink-0"
+              style={{ fontSize: '16px' }}>
+          {expanded ? 'expand_more' : 'chevron_right'}
+        </span>
+        <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border shrink-0 mt-0.5 ${domainColor}`}>
+          {domainLabel}
+        </span>
+        <span className="text-slate-700">
+          <span className="font-medium">{source.title}</span>
+          {source.section && source.section !== 'N/A' && (
+            <span className="text-slate-400 ml-1.5">{source.section}</span>
+          )}
+        </span>
+        {source.similarity && (
+          <span className="ml-auto text-[10px] text-slate-400 shrink-0 mt-0.5">
+            유사도 {source.similarity}
+          </span>
+        )}
+      </button>
+      {expanded && source.preview && (
+        <div className="ml-8 mr-2 mt-1 mb-2 p-3 bg-slate-50 rounded-lg border border-slate-100 text-xs text-slate-600 leading-relaxed whitespace-pre-wrap">
+          {source.preview}
+        </div>
+      )}
+    </li>
+  );
 }
 
 export default function AssistantMessage({ data, reasoningSteps }: AssistantMessageProps) {
@@ -32,9 +74,27 @@ export default function AssistantMessage({ data, reasoningSteps }: AssistantMess
             {data.dataCards && data.dataCards.length > 0 && (
               <DataCardGrid cards={data.dataCards} />
             )}
+            {data.sources && data.sources.length > 0 && (
+              <details className="mt-4 pt-3 border-t border-slate-100">
+                <summary className="cursor-pointer text-xs text-slate-500 flex items-center gap-1.5 select-none hover:text-slate-700 transition-colors list-none [&::-webkit-details-marker]:hidden">
+                  <span className="material-symbols-outlined text-base" style={{ fontSize: '16px' }}>
+                    menu_book
+                  </span>
+                  <span>참고 출처</span>
+                  <span className="bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full text-[10px] font-medium">
+                    {data.sources.length}
+                  </span>
+                </summary>
+                <ul className="mt-2 space-y-0.5">
+                  {data.sources.map((src, i) => (
+                    <SourceItem key={`${src.title}-${src.section}-${i}`} source={src} />
+                  ))}
+                </ul>
+              </details>
+            )}
             {(data.source || data.processingTime) && (
               <div className="mt-4 pt-4 border-t border-slate-100 flex items-center gap-4 text-xs text-slate-400">
-                
+
                 {data.processingTime && (
                   <span className="flex items-center gap-1">
                     <span className="material-symbols-outlined text-sm">schedule</span>

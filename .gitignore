@@ -24,3 +24,8 @@ mcp_servers/logs/
 
 # Docker
 *.log
+
+
+# MD Files
+.md
+docs/
